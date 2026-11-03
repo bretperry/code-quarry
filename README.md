@@ -47,7 +47,7 @@ What's detected: about 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, Op
 
 - **Chunks:** tree-sitter splits each file by function. py, js, jsx, mjs, cjs, ts, mts, cts, tsx, go, rs, java. Only git-tracked files, or every file in a folder outside git.
 - **Ranking:** two rankers, combined by rank: BM25 keywords on stemmed identifier words, and static word vectors weighted by how rare each token is in the repo.
-- **Model:** 27,628 tokens by 64 dimensions, stored as `i8`, compiled into the binary. Built from `BAAI/bge-small-en-v1.5` (MIT) by `tools/build_model.py`, with the model2vec recipe. No neural network runs at search time.
+- **Model:** 27,628 tokens by 64 dimensions, stored as `i8`, compiled into the binary. Built from `BAAI/bge-small-en-v1.5` (MIT, notice in `rust/model/LICENSE`) by `tools/build_model.py`, with the model2vec recipe. No neural network runs at search time.
 - **Search reads the live file**, so code is current. If a file changed since indexing, the function is found again by name. If it's gone, the result says to re-index.
 - **Every `index` run rebuilds the whole index.** It takes about 1.3 seconds per repo.
 
