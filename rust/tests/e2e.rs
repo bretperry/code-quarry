@@ -258,3 +258,22 @@ fn the_index_is_gitignored_by_itself() {
     repo.run(&["index", "."]);
     assert_eq!(fs::read_to_string(repo.0.join(".code-scry/.gitignore")).unwrap(), "*\n");
 }
+
+#[test]
+fn a_comment_above_a_function_makes_it_findable() {
+    let repo = Repo::new();
+    repo.write("a.js", "// Retries a failed upload with exponential backoff.\nfunction send(x) {\n  return x;\n}\n\nfunction other(y) {\n  return y + 1;\n}\n");
+    repo.run(&["index", "."]);
+    let out = repo.search("exponential backoff");
+    assert!(out.lines().next().unwrap().contains("a.js:2-4 send"), "{out}");
+}
+
+#[test]
+fn a_secret_in_a_comment_above_a_function_does_not_reach_the_index_or_the_output() {
+    let repo = Repo::new();
+    let token = ["gh", "p_", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7aB3dE6gH9"].concat();
+    repo.write("a.js", &format!("// Uses {token} to push releases.\nfunction publish(x) {{\n  return x;\n}}\n"));
+    repo.run(&["index", "."]);
+    assert!(!contains(&repo.index_bytes(), &token));
+    assert!(!repo.search("push releases").contains(&token));
+}

@@ -9,7 +9,7 @@ use crate::{embed, redact};
 const DIR: &str = ".code-scry";
 const FILE: &str = "index";
 const MAGIC: &[u8; 4] = b"CSRY";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 pub const KINDS: &[&str] = &["function", "method", "module"];
 
 pub struct FileEntry {

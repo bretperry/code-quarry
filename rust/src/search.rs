@@ -5,8 +5,11 @@ use crate::index::{self, Refused};
 use crate::store::{ChunkEntry, Index, KINDS};
 use crate::{chunk, embed, redact, store, terms};
 
-const BM25_K1: f32 = 1.2;
-const BM25_B: f32 = 0.75;
+const BM25_K1: f32 = 2.0;
+const BM25_B: f32 = 0.9;
+/// Keyword matches count more than vector matches. With these BM25 settings, weights from 1.5 to 3
+/// beat 1 on 430 queries made from code comments; the 30 hard queries preferred 1 to 1.5.
+const KEYWORD_WEIGHT: f32 = 1.5;
 /// Reciprocal rank fusion: a low constant lets a top rank from either ranker count.
 const FUSION_K: f32 = 20.0;
 pub const MAX_OUTPUT_CHARS: usize = 6000;
@@ -53,11 +56,11 @@ fn vector_scores(index: &Index, query: &str, model: &embed::Model) -> Vec<f32> {
         .collect()
 }
 
-fn add_fused_ranks(scores: &[f32], total: &mut [f32]) {
+fn add_fused_ranks(scores: &[f32], total: &mut [f32], weight: f32) {
     let mut order: Vec<usize> = (0..scores.len()).collect();
     order.sort_unstable_by(|a, b| scores[*b].total_cmp(&scores[*a]).then(a.cmp(b)));
     for (rank, i) in order.into_iter().enumerate() {
-        total[i] += 1.0 / (FUSION_K + rank as f32);
+        total[i] += weight / (FUSION_K + rank as f32);
     }
 }
 
@@ -129,12 +132,12 @@ pub fn run(query: String, repo: Option<std::path::PathBuf>, k: usize, max_lines:
     let model = embed::Model::load();
 
     let mut total = vec![0f32; index.chunks.len()];
-    add_fused_ranks(&keyword_scores(&index, &query), &mut total);
-    add_fused_ranks(&vector_scores(&index, &query, &model), &mut total);
+    add_fused_ranks(&keyword_scores(&index, &query), &mut total, KEYWORD_WEIGHT);
+    add_fused_ranks(&vector_scores(&index, &query, &model), &mut total, 1.0);
     let mut order: Vec<usize> = (0..total.len()).collect();
     order.sort_unstable_by(|a, b| total[*b].total_cmp(&total[*a]).then(a.cmp(b)));
     for i in order.into_iter().take(k) {
-        let best = 2.0 / FUSION_K;
+        let best = (KEYWORD_WEIGHT + 1.0) / FUSION_K;
         print_hit(&root, &index, &index.chunks[i], total[i] / best, max_lines);
     }
     Ok(())

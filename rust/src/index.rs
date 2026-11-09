@@ -111,6 +111,39 @@ pub enum Refused {
     Withheld,
 }
 
+const MAX_COMMENT_LINES: usize = 40;
+const MAX_COMMENT_CHARS: usize = 600;
+
+/// The comment block directly above a function (`start` is its 1-based line), markers and doc tags
+/// removed. Rust attribute lines in between are skipped; a blank line ends the block.
+fn leading_comment(lines: &[&str], start: usize) -> String {
+    let mut found: Vec<&str> = Vec::new();
+    let mut i = start.saturating_sub(1).min(lines.len());
+    let mut steps = 0;
+    while i > 0 && steps < MAX_COMMENT_LINES {
+        let line = lines[i - 1].trim();
+        i -= 1;
+        steps += 1;
+        if line.starts_with("#[") {
+            continue;
+        }
+        let is_comment = line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+            || line.ends_with("*/")
+            || line.starts_with('#');
+        if !is_comment {
+            break;
+        }
+        let text = line.trim_start_matches(['/', '*', '#', '!']).trim().trim_end_matches("*/").trim();
+        if !text.is_empty() && !text.starts_with('@') {
+            found.push(text);
+        }
+    }
+    found.reverse();
+    first_chars(&found.join(" "), MAX_COMMENT_CHARS)
+}
+
 struct Pending {
     head: Vec<u32>,
     body: Vec<u32>,
@@ -149,9 +182,14 @@ pub fn run(repo: PathBuf) -> Result<(), String> {
         let filename = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let file = index.files.len() as u32;
         index.files.push(FileEntry { path: rel.clone(), hash: fnv64(source.clean.as_bytes()) });
+        let lines: Vec<&str> = source.clean.lines().collect();
         for c in source.chunks(&language, &filename) {
+            // The comment above a function holds the words people search with. It is read from the
+            // redacted text and only feeds the hashed terms and vectors; it is never stored or printed.
+            let comment = leading_comment(&lines, c.start_line as usize);
+            let text = if comment.is_empty() { c.content.clone() } else { format!("{comment}\n{}", c.content) };
             let head = model.tokens(&format!("{rel} {}", c.symbol));
-            let body = model.tokens(&first_chars(&c.content, MAX_EMBED_CHARS));
+            let body = model.tokens(&first_chars(&text, MAX_EMBED_CHARS));
             let mut seen: Vec<u32> = head.iter().chain(&body).copied().collect();
             seen.sort_unstable();
             seen.dedup();
@@ -161,7 +199,7 @@ pub fn run(repo: PathBuf) -> Result<(), String> {
             pending.push(Pending { head, body });
 
             let mut counts: HashMap<u32, u32> = HashMap::new();
-            for t in terms::terms(&c.content) {
+            for t in terms::terms(&text) {
                 *counts.entry(t).or_default() += 1;
             }
             for t in terms::terms(&format!("{filename} {}", c.symbol)) {
@@ -196,4 +234,28 @@ pub fn run(repo: PathBuf) -> Result<(), String> {
         bytes / 1024
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leading_comment;
+
+    #[test]
+    fn a_block_comment_above_a_function_is_read_without_markers_or_tags() {
+        let lines = ["x = 1", "", "/**", " * Retries the upload.", " * @param n count", " */", "function send(n) {"];
+        assert_eq!(leading_comment(&lines, 7), "Retries the upload.");
+    }
+
+    #[test]
+    fn line_comments_are_joined_and_rust_attributes_are_skipped() {
+        let lines = ["fn a() {}", "/// Parses the header.", "/// Returns none if absent.", "#[test]", "fn b() {}"];
+        assert_eq!(leading_comment(&lines, 5), "Parses the header. Returns none if absent.");
+    }
+
+    #[test]
+    fn a_blank_line_ends_the_block_and_code_is_not_a_comment() {
+        let lines = ["// header", "", "const x = 1;", "function f() {}"];
+        assert_eq!(leading_comment(&lines, 4), "");
+        assert_eq!(leading_comment(&lines, 3), "");
+    }
 }

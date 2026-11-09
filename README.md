@@ -45,8 +45,8 @@ What's detected: about 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, Op
 
 ## How it works
 
-- **Chunks:** tree-sitter splits each file by function. py, js, jsx, mjs, cjs, ts, mts, cts, tsx, go, rs, java. Only git-tracked files, or every file in a folder outside git.
-- **Ranking:** two rankers, combined by rank: BM25 keywords on stemmed identifier words, and static word vectors weighted by how rare each token is in the repo.
+- **Chunks:** tree-sitter splits each file by function. py, js, jsx, mjs, cjs, ts, mts, cts, tsx, go, rs, java. Only git-tracked files, or every file in a folder outside git. The comment block directly above a function is indexed with it, so a question can match the comment's words. Comments are read after redaction, feed only the hashed keywords and vectors, and are not printed.
+- **Ranking:** two rankers, combined by rank: BM25 keywords on stemmed identifier words (counted 1.5 times as much), and static word vectors weighted by how rare each token is in the repo.
 - **Model:** 27,628 tokens by 64 dimensions, stored as `i8`, compiled into the binary. Built from `BAAI/bge-small-en-v1.5` (MIT, notice in `rust/model/LICENSE`) by `tools/build_model.py`, with the model2vec recipe. No neural network runs at search time.
 - **Search reads the live file**, so code is current. If a file changed since indexing, the function is found again by name. If it's gone, the result says to re-index.
 - **Every `index` run rebuilds the whole index.** It takes about 1.3 seconds per repo.
@@ -70,9 +70,12 @@ Measured 2026-11-02 on an 8-core Mac, on exports of two real repos (3,648 chunks
 | | Right answer in top 5 | Top result right | MRR |
 |---|---|---|---|
 | bge-small via ONNX (0.1) | 16 of 30 | 6 of 30 | 0.36 |
-| This version | 11 of 30 | 7 of 30 | 0.28 |
+| Embedded, first release (0.2) | 11 of 30 | 7 of 30 | 0.28 |
+| Embedded, comments indexed and ranking tuned | 14 of 30 | 8 of 30 | 0.36 |
 
-It finds fewer answers when a query shares no words with the code. Use the code's own terms where you know them, and fall back to grep when results look wrong. One person wrote these queries, and 30 is a small sample.
+The first two rows were measured on 2026-11-02. The last was measured on 2026-11-09, after the repos had changed; the first release re-run on that data scores 11 of 30, 8 of 30, 0.31.
+
+It still finds fewer answers than the neural version when a query shares no words with the code. Indexing the comment above each function and counting keyword matches 1.5 times as much won back 3 of the 5 missing answers. Larger vectors (256 and 384 dimensions), query expansion, and relevance feedback did not help in tests. Use the code's own terms where you know them, and fall back to grep when results look wrong. One person wrote these queries, and 30 is a small sample: one query is 3.3 points.
 
 ## Use from Claude Code
 
