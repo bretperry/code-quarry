@@ -1,0 +1,104 @@
+# Builds code-scry for each platform in npm/platforms.json and publishes it to npm.
+# Trigger: push a tag vX.Y.Z matching rust/Cargo.toml's version.
+# Needs repo secret NPM_TOKEN (npm automation or granular token with publish rights).
+# Public repo: hosted runners are free here.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm (otherwise build and stage only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-latest, smoke: true }
+          - { target: x86_64-apple-darwin, runner: macos-latest, smoke: false }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, smoke: true }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, smoke: true }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, smoke: true }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "$GITHUB_ENV"
+        env:
+          TARGET: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+        working-directory: rust
+      - name: Smoke test
+        if: matrix.smoke
+        run: |
+          exe=rust/target/${{ matrix.target }}/release/code-scry
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" index .
+          "$exe" search "redact secrets from a line" -k 3 | tee out.txt
+          grep -q -- "---" out.txt
+      - name: Collect binary
+        run: |
+          mkdir -p bin/${{ matrix.target }}
+          cp rust/target/${{ matrix.target }}/release/code-scry* bin/${{ matrix.target }}/
+          rm -f bin/${{ matrix.target }}/*.d bin/${{ matrix.target }}/*.pdb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: bin
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: bin
+          merge-multiple: true
+      - name: Check tag matches Cargo.toml
+        id: version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $v"; exit 1
+          fi
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+      - run: node npm/stage.mjs ${{ steps.version.outputs.v }} bin
+      - name: Require every platform
+        run: test "$(ls -d npm/dist/code-scry-*/ | wc -l)" -eq "$(node -p 'require("./npm/platforms.json").length')"
+      - name: Publish
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Platform packages first, so the main package never points at missing versions.
+          for d in npm/dist/code-scry-*/ npm/dist/code-scry/; do
+            name=$(node -p "require('./$d/package.json').name")
+            if npm view "$name@${{ steps.version.outputs.v }}" version >/dev/null 2>&1; then
+              echo "$name@${{ steps.version.outputs.v }} already published, skipping"; continue
+            fi
+            npm publish "$d" --access public --provenance
+          done

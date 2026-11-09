@@ -4,3 +4,4 @@ code_scry.egg-info/
 __pycache__/
 target/
 .code-scry/
+npm/dist/
