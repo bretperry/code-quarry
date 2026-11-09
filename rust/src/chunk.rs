@@ -1,4 +1,4 @@
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, Parser, Tree};
 
 const FUNC_TYPES: &[&str] = &[
     "function_definition",
@@ -114,15 +114,19 @@ fn walk(node: Node, scope: &mut Vec<String>, src: &[u8], out: &mut Vec<Chunk>) {
     }
 }
 
-pub fn chunk_source(src: &[u8], language: &Language, filename: &str) -> Vec<Chunk> {
+fn parse(src: &[u8], language: &Language) -> Option<Tree> {
     let mut parser = Parser::new();
-    if parser.set_language(language).is_err() {
-        return vec![];
-    }
-    let Some(tree) = parser.parse(src, None) else { return vec![] };
+    parser.set_language(language).ok()?;
+    parser.parse(src, None)
+}
 
+/// The file's chunks, and every call in it as (1-based line of the called name, name), from one parse.
+pub fn chunks_and_calls(src: &[u8], language: &Language, filename: &str) -> (Vec<Chunk>, Vec<(u32, String)>) {
+    let tree = parse(src, language);
     let mut out = Vec::new();
-    walk(tree.root_node(), &mut Vec::new(), src, &mut out);
+    if let Some(tree) = &tree {
+        walk(tree.root_node(), &mut Vec::new(), src, &mut out);
+    }
 
     if out.is_empty() {
         let text = String::from_utf8_lossy(src);
@@ -138,5 +142,60 @@ pub fn chunk_source(src: &[u8], language: &Language, filename: &str) -> Vec<Chun
             });
         }
     }
+    (out, tree.map(|t| calls(&t, src)).unwrap_or_default())
+}
+
+/// The name a call goes to, with its 1-based line: the last identifier of `f()`, `a.b.f()`,
+/// `a::f()`, `f::<T>()`, `new F()`.
+fn callee_name(node: Node, src: &[u8]) -> Option<(u32, String)> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "property_identifier" | "type_identifier" => {
+            Some((node.start_position().row as u32 + 1, String::from_utf8_lossy(&src[node.byte_range()]).into_owned()))
+        }
+        _ => ["property", "field", "attribute", "name", "function"]
+            .iter()
+            .find_map(|f| node.child_by_field_name(f))
+            .and_then(|n| callee_name(n, src)),
+    }
+}
+
+fn calls(tree: &Tree, src: &[u8]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let callee = match node.kind() {
+            "call_expression" | "call" => node.child_by_field_name("function"),
+            "method_invocation" => node.child_by_field_name("name"),
+            "new_expression" => node.child_by_field_name("constructor"),
+            "object_creation_expression" => node.child_by_field_name("type"),
+            _ => None,
+        };
+        if let Some((at, name)) = callee.and_then(|c| callee_name(c, src)) {
+            out.push((at, name));
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(ext: &str, src: &str) -> Vec<String> {
+        let (_, language) = lang_for(ext).unwrap();
+        let mut got: Vec<String> = chunks_and_calls(src.as_bytes(), &language, "f").1.into_iter().map(|(_, n)| n).collect();
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn calls_are_named_by_their_last_identifier_in_each_language() {
+        assert_eq!(names("ts", "function f() { a.b.retry(); send(); new Queue(); }"), ["Queue", "retry", "send"]);
+        assert_eq!(names("py", "def f():\n    self.retry()\n    send()\n"), ["retry", "send"]);
+        assert_eq!(names("rs", "fn f() { a::retry(); x.send(); g::<u8>(); }"), ["g", "retry", "send"]);
+        assert_eq!(names("go", "func f() { http.Retry(); send() }"), ["Retry", "send"]);
+        assert_eq!(names("java", "class A { void f() { q.retry(); new Queue(); } }"), ["Queue", "retry"]);
+    }
 }

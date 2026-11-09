@@ -277,3 +277,13 @@ fn a_secret_in_a_comment_above_a_function_does_not_reach_the_index_or_the_output
     assert!(!contains(&repo.index_bytes(), &token));
     assert!(!repo.search("push releases").contains(&token));
 }
+
+#[test]
+fn a_function_ranks_above_unrelated_code_when_its_caller_matches() {
+    let repo = Repo::new();
+    repo.write("a.js", "function retryUpload(x) {\n  return send(x);\n}\n\nfunction other(y) {\n  return y + 1;\n}\n\nfunction send(x) {\n  return x;\n}\n");
+    repo.run(&["index", "."]);
+    let out = repo.search("retry upload");
+    let at = |name: &str| out.lines().filter(|l| l.starts_with("--- ")).position(|l| l.contains(name)).unwrap();
+    assert!(at(" send ") < at(" other "), "{out}");
+}

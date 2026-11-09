@@ -1,5 +1,5 @@
 //! The per-repo index file: file hashes, chunk locations, keyword hashes, and one i8 vector per
-//! chunk. It holds no source text; `search` reads the live file and redacts it again at output.
+//! chunk, and which chunks each one calls. It holds no source text; `search` reads the live file and redacts it again at output.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use crate::{embed, redact};
 const DIR: &str = ".code-scry";
 const FILE: &str = "index";
 const MAGIC: &[u8; 4] = b"CSRY";
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 pub const KINDS: &[&str] = &["function", "method", "module"];
 
 pub struct FileEntry {
@@ -27,6 +27,8 @@ pub struct ChunkEntry {
     pub length: u32,
     /// Distinct terms: hash and count.
     pub terms: Vec<(u32, u8)>,
+    /// Chunks this one calls, by index.
+    pub calls: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -88,6 +90,10 @@ impl Index {
                 put_u32(&mut out, *hash);
                 out.push(*count);
             }
+            put_u32(&mut out, c.calls.len() as u32);
+            for n in &c.calls {
+                put_u32(&mut out, *n);
+            }
         }
         out.extend(self.vectors.iter().map(|v| *v as u8));
 
@@ -121,7 +127,9 @@ impl Index {
                 let kind = r.take(1)?[0];
                 let symbol = r.str()?;
                 let terms = (0..n_terms).map(|_| Some((r.u32()?, r.take(1)?[0]))).collect::<Option<Vec<_>>>()?;
-                Some(ChunkEntry { file, start_line, end_line, kind, symbol, length, terms })
+                let n_calls = r.u32()? as usize;
+                let calls = (0..n_calls).map(|_| r.u32().filter(|n| (*n as usize) < n_chunks)).collect::<Option<Vec<_>>>()?;
+                Some(ChunkEntry { file, start_line, end_line, kind, symbol, length, terms, calls })
             })
             .collect::<Option<Vec<_>>>()?;
         let vectors = r.take(n_chunks.checked_mul(embed::DIMS)?)?.iter().map(|b| *b as i8).collect();

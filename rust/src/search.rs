@@ -12,6 +12,9 @@ const BM25_B: f32 = 0.9;
 const KEYWORD_WEIGHT: f32 = 1.5;
 /// Reciprocal rank fusion: a low constant lets a top rank from either ranker count.
 const FUSION_K: f32 = 20.0;
+/// A function scores this share of its best caller's score on top of its own: the code that calls
+/// it often says what it is for. Callees' scores hurt, so they aren't used.
+const CALLER_WEIGHT: f32 = 0.5;
 pub const MAX_OUTPUT_CHARS: usize = 6000;
 
 fn keyword_scores(index: &Index, query: &str) -> Vec<f32> {
@@ -62,6 +65,17 @@ fn add_fused_ranks(scores: &[f32], total: &mut [f32], weight: f32) {
     for (rank, i) in order.into_iter().enumerate() {
         total[i] += weight / (FUSION_K + rank as f32);
     }
+}
+
+/// Adds `CALLER_WEIGHT` times each chunk's best caller's score.
+fn add_caller_scores(index: &Index, scores: &[f32]) -> Vec<f32> {
+    let mut best_caller = vec![0f32; scores.len()];
+    for (i, c) in index.chunks.iter().enumerate() {
+        for j in &c.calls {
+            best_caller[*j as usize] = best_caller[*j as usize].max(scores[i]);
+        }
+    }
+    scores.iter().zip(best_caller).map(|(s, b)| s + CALLER_WEIGHT * b).collect()
 }
 
 /// Lines `start..=end` (1-based) of cleaned text, capped, saying what the cap cut.
@@ -134,10 +148,11 @@ pub fn run(query: String, repo: Option<std::path::PathBuf>, k: usize, max_lines:
     let mut total = vec![0f32; index.chunks.len()];
     add_fused_ranks(&keyword_scores(&index, &query), &mut total, KEYWORD_WEIGHT);
     add_fused_ranks(&vector_scores(&index, &query, &model), &mut total, 1.0);
+    let total = add_caller_scores(&index, &total);
     let mut order: Vec<usize> = (0..total.len()).collect();
     order.sort_unstable_by(|a, b| total[*b].total_cmp(&total[*a]).then(a.cmp(b)));
     for i in order.into_iter().take(k) {
-        let best = (KEYWORD_WEIGHT + 1.0) / FUSION_K;
+        let best = (KEYWORD_WEIGHT + 1.0) / FUSION_K * (1.0 + CALLER_WEIGHT);
         print_hit(&root, &index, &index.chunks[i], total[i] / best, max_lines);
     }
     Ok(())

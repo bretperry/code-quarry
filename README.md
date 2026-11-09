@@ -46,7 +46,8 @@ What's detected: about 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, Op
 ## How it works
 
 - **Chunks:** tree-sitter splits each file by function. py, js, jsx, mjs, cjs, ts, mts, cts, tsx, go, rs, java. Only git-tracked files, or every file in a folder outside git. The comment block directly above a function is indexed with it, so a question can match the comment's words. Comments are read after redaction, feed only the hashed keywords and vectors, and are not printed.
-- **Ranking:** two rankers, combined by rank: BM25 keywords on stemmed identifier words (counted 1.5 times as much), and static word vectors weighted by how rare each token is in the repo.
+- **Ranking:** two rankers, combined by rank: BM25 keywords on stemmed identifier words (counted 1.5 times as much), and static word vectors weighted by how rare each token is in the repo. Then each function gains half its best caller's score, since the code that calls a function often says what it is for.
+- **Call links:** at index time, tree-sitter finds each call and links it to the function of that name: same file first, and skipped when more than 3 functions share the name. The index stores only the links, as chunk numbers. A call on a line that redaction changed is not linked.
 - **Model:** 27,628 tokens by 64 dimensions, stored as `i8`, compiled into the binary. Built from `BAAI/bge-small-en-v1.5` (MIT, notice in `rust/model/LICENSE`) by `tools/build_model.py`, with the model2vec recipe. No neural network runs at search time.
 - **Search reads the live file**, so code is current. If a file changed since indexing, the function is found again by name. If it's gone, the result says to re-index.
 - **Every `index` run rebuilds the whole index.** It takes about 1.3 seconds per repo.
@@ -72,10 +73,13 @@ Measured 2026-11-02 on an 8-core Mac, on exports of two real repos (3,648 chunks
 | bge-small via ONNX (0.1) | 16 of 30 | 6 of 30 | 0.36 |
 | Embedded, first release (0.2) | 11 of 30 | 7 of 30 | 0.28 |
 | Embedded, comments indexed and ranking tuned | 14 of 30 | 8 of 30 | 0.36 |
+| Embedded, plus callers' scores | 16 of 30 | 9 of 30 | 0.39 |
 
-The first two rows were measured on 2026-11-02. The last was measured on 2026-11-09, after the repos had changed; the first release re-run on that data scores 11 of 30, 8 of 30, 0.31.
+The first two rows were measured on 2026-11-02. The last two were measured on 2026-11-09, after the repos had changed; the first release re-run on that data scores 11 of 30, 8 of 30, 0.31.
 
-It still finds fewer answers than the neural version when a query shares no words with the code. Indexing the comment above each function and counting keyword matches 1.5 times as much won back 3 of the 5 missing answers. Larger vectors (256 and 384 dimensions), query expansion, and relevance feedback did not help in tests. Use the code's own terms where you know them, and fall back to grep when results look wrong. One person wrote these queries, and 30 is a small sample: one query is 3.3 points.
+A second check uses 728 queries made from the comments above functions in five repos, with each target's comment deleted from the repo first so the index can't have seen it. Adding callers' scores raised the right answer in the top 5 from 56% to 63% on whole comments (431 queries) and from 26% to 33% on comment fragments (297). Callees' scores made results worse. Latent semantic indexing and a learned reranker helped the whole-comment queries but moved the 30 hard queries by one answer at most, so they were left out.
+
+It now matches the neural version's 16 of 30 in the top 5. Indexing the comment above each function and counting keyword matches 1.5 times as much won back 3 answers, and callers' scores 2 more. Larger vectors (256 and 384 dimensions), query expansion, and relevance feedback did not help in tests. Use the code's own terms where you know them, and fall back to grep when results look wrong. One person wrote these queries, and 30 is a small sample: one query is 3.3 points.
 
 ## Use from Claude Code
 
