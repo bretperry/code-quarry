@@ -4,7 +4,9 @@
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
-const pkg = `code-scry-${process.platform}-${process.arch}`;
+// npm blocked the name code-scry-win32-x64 as spam, so Windows uses "windows".
+const os = process.platform === "win32" ? "windows" : process.platform;
+const pkg = `code-scry-${os}-${process.arch}`;
 const exe = process.platform === "win32" ? "code-scry.exe" : "code-scry";
 
 let bin;
