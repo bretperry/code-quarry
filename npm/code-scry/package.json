@@ -1,5 +1,5 @@
 {
-  "name": "code-scry",
+  "name": "code-scry-cli",
   "version": "0.0.0",
   "description": "Plain-English code search in one small binary. No database, no network, secrets redacted.",
   "license": "MIT",

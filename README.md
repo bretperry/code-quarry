@@ -4,7 +4,7 @@ Plain-English code search in one 6 MB binary. No Docker, no database, no downloa
 Results include the function's code, with detected secrets removed.
 
 ```bash
-npm install -g code-scry                           # prebuilt: macOS/Linux x64+arm64, Windows x64
+npm install -g code-scry-cli                       # prebuilt: macOS/Linux x64+arm64, Windows x64
 # or from source: cd rust && cargo install --path .
 cd ~/Dev/some-repo
 code-scry index .                                  # writes .code-scry/index, ignored by git
