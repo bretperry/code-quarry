@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="code-quarry: ask your codebase a question, get back the functions that answer it">
+  <style>
+    .bg { fill: #F7F3EC; }
+    .title { fill: #1F1A15; font: 700 112px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: -4px; }
+    .prompt { fill: #D97706; }
+    .tag { fill: #5C5248; font: 400 26px ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .layer { fill: #E9E1D5; }
+    .layer2 { fill: #DED4C5; }
+    .line { fill: #C9BDAB; }
+    .gem { fill: #FFFFFF; stroke: #D97706; stroke-width: 3; }
+    .shadow { fill: #1F1A15; opacity: 0.08; }
+    .code { fill: #1F1A15; font: 600 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .meta { fill: #B45309; font: 500 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .pick { stroke: #D97706; stroke-width: 3; fill: none; stroke-linecap: round; stroke-dasharray: 2 9; }
+  </style>
+  <rect class="bg" width="1280" height="360"/>
+
+  <text class="title" x="72" y="196"><tspan class="prompt">$</tspan><tspan dx="28">quarry</tspan></text>
+  <text class="tag" x="76" y="250">Ask your codebase a question.</text>
+  <text class="tag" x="76" y="288">Get back the functions that answer it.</text>
+
+  <!-- strata of code; one function lifted out -->
+  <g transform="translate(720 28)">
+    <rect class="layer"  x="0" y="0"   width="500" height="40" rx="8"/>
+    <rect class="layer2" x="0" y="48"  width="500" height="40" rx="8"/>
+    <rect class="layer"  x="0" y="96"  width="500" height="40" rx="8"/>
+    <rect class="layer2" x="0" y="144" width="500" height="40" rx="8"/>
+    <rect class="layer"  x="0" y="192" width="500" height="40" rx="8"/>
+
+    <rect class="line" x="20"  y="16"  width="140" height="8" rx="4"/>
+    <rect class="line" x="176" y="16"  width="220" height="8" rx="4"/>
+    <rect class="line" x="20"  y="64"  width="260" height="8" rx="4"/>
+    <rect class="line" x="296" y="64"  width="90"  height="8" rx="4"/>
+    <rect class="line" x="20"  y="160" width="180" height="8" rx="4"/>
+    <rect class="line" x="216" y="160" width="200" height="8" rx="4"/>
+    <rect class="line" x="20"  y="208" width="310" height="8" rx="4"/>
+
+    <!-- the gap the gem came out of -->
+    <rect x="0" y="96" width="500" height="40" rx="8" fill="none" stroke="#C9BDAB" stroke-width="2" stroke-dasharray="6 6"/>
+    <path class="pick" d="M500 116 C 548 116, 548 281, 480 281"/>
+
+    <!-- the found function -->
+    <rect class="shadow" x="44" y="262" width="440" height="58" rx="10"/>
+    <rect class="gem"    x="36" y="252" width="440" height="58" rx="10"/>
+    <text class="meta" x="56" y="274">0.917  src/http.ts:41-58</text>
+    <text class="code" x="56" y="300">retryFailedRequest()</text>
+  </g>
+</svg>
