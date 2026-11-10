@@ -3,6 +3,7 @@ mod embed;
 mod index;
 mod redact;
 mod search;
+mod setup;
 mod store;
 mod terms;
 
@@ -13,11 +14,13 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 quarry: plain-English code search. Secrets are stripped by detection; see README for limits.
 
-  quarry index [folder]                       build .quarry/index (default: .)
+  quarry setup [folder] [--yes]               tell this repo's AI agents to use quarry (asks first)
   quarry search <question...> [options]       print the best functions with their code
       -k <n>         results (default 5)
       --lines <n>    code lines per result (default: the whole function, capped)
       --repo <dir>   folder to search from (default: current folder)
+      --no-refresh   skip re-indexing when files changed
+  quarry index [folder]                       build .quarry/index (default: .); search does this itself in a git repo
 ";
 
 /// Writes to stdout. A reader that stopped early (`| head`) is normal, so that ends the run with
@@ -44,11 +47,12 @@ fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             index::run(PathBuf::from(repo))
         }
         Some("search") => {
-            let (mut words, mut repo, mut k, mut lines) = (Vec::new(), None, 5, None);
+            let (mut words, mut repo, mut k, mut lines, mut refresh) = (Vec::new(), None, 5, None, true);
             while let Some(a) = args.next() {
                 match a.as_str() {
                     "-k" => k = number(args.next(), "-k")?,
                     "--lines" => lines = Some(number(args.next(), "--lines")?),
+                    "--no-refresh" => refresh = false,
                     "--repo" => repo = Some(PathBuf::from(args.next().ok_or("--repo needs a folder")?)),
                     _ => words.push(a),
                 }
@@ -56,7 +60,18 @@ fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             if words.is_empty() {
                 return Err(USAGE.into());
             }
-            search::run(words.join(" "), repo, k, lines)
+            search::run(words.join(" "), repo, k, lines, refresh)
+        }
+        Some("setup") => {
+            let (mut folder, mut yes) = (None, false);
+            for a in args {
+                match a.as_str() {
+                    "-y" | "--yes" => yes = true,
+                    _ if folder.is_none() => folder = Some(PathBuf::from(a)),
+                    _ => return Err(USAGE.into()),
+                }
+            }
+            setup::run(folder.unwrap_or_else(|| ".".into()), yes)
         }
         Some("-h" | "--help" | "help") => {
             emit(USAGE);

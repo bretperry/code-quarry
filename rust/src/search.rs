@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::index::{self, Refused};
 use crate::store::{ChunkEntry, Index, KINDS};
@@ -135,14 +135,40 @@ fn print_hit(root: &Path, index: &Index, c: &ChunkEntry, score: f32, max_lines: 
     }
 }
 
-pub fn run(query: String, repo: Option<std::path::PathBuf>, k: usize, max_lines: Option<usize>) -> Result<(), String> {
+/// The git repo holding `start`, if any.
+pub fn git_root(start: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git").arg("-C").arg(start).args(["rev-parse", "--show-toplevel"]).output().ok()?;
+    let top = String::from_utf8(out.stdout).ok()?;
+    if out.status.success() && !top.trim().is_empty() { PathBuf::from(top.trim()).canonicalize().ok() } else { None }
+}
+
+/// Finds the index for `start`, building it first when there is none in a git repo, or rebuilding
+/// it when files changed since. Notes go to stderr so stdout stays only results.
+fn fresh_index(start: &Path, refresh: bool) -> Result<(PathBuf, Index), String> {
+    let root = match store::find_root(start) {
+        Some(root) => root,
+        None => {
+            // Outside git there's no telling how big the folder is (it could be ~), so ask first.
+            let root = git_root(start).ok_or("Nothing indexed here, and it's not a git repo. Run: quarry index <folder>")?;
+            eprint!("quarry: no index yet, building one. {}", index::build(&root)?);
+            return Ok((root.clone(), Index::load(&root)?));
+        }
+    };
+    let index = Index::load(&root)?;
+    if refresh && index::is_stale(&root, &index) {
+        eprint!("quarry: files changed since indexing, re-indexing. {}", index::build(&root)?);
+        return Ok((root.clone(), Index::load(&root)?));
+    }
+    Ok((root, index))
+}
+
+pub fn run(query: String, repo: Option<PathBuf>, k: usize, max_lines: Option<usize>, refresh: bool) -> Result<(), String> {
     let start = match repo {
         Some(p) => p,
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
     let start = start.canonicalize().map_err(|e| format!("no such folder: {}: {e}", start.display()))?;
-    let root = store::find_root(&start).ok_or("Nothing indexed here. Run: quarry index .")?;
-    let index = Index::load(&root)?;
+    let (root, index) = fresh_index(&start, refresh)?;
     let model = embed::Model::load();
 
     let mut total = vec![0f32; index.chunks.len()];

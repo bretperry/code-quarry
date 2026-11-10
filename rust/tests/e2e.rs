@@ -35,6 +35,20 @@ impl Repo {
         String::from_utf8(self.run(&["search", q, "-k", "20"]).stdout).unwrap()
     }
 
+    /// Searches without re-indexing first, as if the change went unnoticed.
+    fn search_stale(&self, q: &str) -> String {
+        String::from_utf8(self.run(&["search", q, "-k", "20", "--no-refresh"]).stdout).unwrap()
+    }
+
+    fn quarry(&self, args: &[&str]) -> Output {
+        // HOME points into the repo so the user's own agent folders don't change what setup does.
+        Command::new(env!("CARGO_BIN_EXE_quarry")).args(args).current_dir(&self.0).env("HOME", &self.0).env("USERPROFILE", &self.0).output().unwrap()
+    }
+
+    fn git_init(&self) {
+        assert!(Command::new("git").args(["init", "-q"]).current_dir(&self.0).status().unwrap().success());
+    }
+
     fn index_bytes(&self) -> Vec<u8> {
         fs::read(self.0.join(".quarry/index")).unwrap()
     }
@@ -162,7 +176,8 @@ fn a_secret_added_after_indexing_is_redacted_at_output() {
     repo.run(&["index", "."]);
     let secret = ["gh", "p_", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7aB3dE6gH9"].concat();
     repo.write("a.py", &format!("# moved\n\ndef fetch_report():\n    t = \"{secret}\"\n    return 1\n"));
-    let out = repo.search("fetch report");
+    // Without the refresh, so this checks redaction of the live file against the old index.
+    let out = repo.search_stale("fetch report");
     assert!(!out.contains(&secret), "{out}");
     assert!(out.contains("a.py:3-5"), "the symbol's new lines: {out}");
     assert!(out.contains("[REDACTED]"), "{out}");
@@ -214,7 +229,7 @@ fn a_removed_function_says_so() {
     repo.write("a.py", "def fetch_report():\n    return 1\n");
     repo.run(&["index", "."]);
     repo.write("a.py", "def other():\n    return 2\n");
-    assert!(repo.search("fetch report").contains("gone from the file"));
+    assert!(repo.search_stale("fetch report").contains("gone from the file"));
 }
 
 #[test]
@@ -286,4 +301,55 @@ fn a_function_ranks_above_unrelated_code_when_its_caller_matches() {
     let out = repo.search("retry upload");
     let at = |name: &str| out.lines().filter(|l| l.starts_with("--- ")).position(|l| l.contains(name)).unwrap();
     assert!(at(" send ") < at(" other "), "{out}");
+}
+
+#[test]
+fn search_builds_the_index_itself_in_a_git_repo() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a.py", "def fetch_report():\n    return 1\n");
+    // Only git-tracked files are indexed.
+    assert!(Command::new("git").args(["add", "a.py"]).current_dir(&repo.0).status().unwrap().success());
+    let out = repo.quarry(&["search", "fetch report"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no index yet"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("a.py:1-2"));
+}
+
+#[test]
+fn search_reindexes_when_a_file_changed() {
+    let repo = Repo::new();
+    repo.write("a.py", "def fetch_report():\n    return 1\n");
+    repo.run(&["index", "."]);
+    repo.write("b.py", "def upload_invoice():\n    return 2\n");
+    let out = repo.quarry(&["search", "upload invoice"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("re-indexing"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("b.py:1-2"));
+    let again = repo.quarry(&["search", "upload invoice"]);
+    assert_eq!(String::from_utf8_lossy(&again.stderr), "", "an unchanged repo is not re-indexed");
+}
+
+#[test]
+fn setup_writes_nothing_without_a_yes() {
+    let repo = Repo::new();
+    repo.write("CLAUDE.md", "# Mine\n");
+    let out = repo.quarry(&["setup"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Nothing written"));
+    assert!(!repo.0.join("AGENTS.md").exists());
+    assert_eq!(fs::read_to_string(repo.0.join("CLAUDE.md")).unwrap(), "# Mine\n");
+}
+
+#[test]
+fn setup_with_yes_adds_the_rule_and_indexes() {
+    let repo = Repo::new();
+    repo.write("CLAUDE.md", "# Mine\n");
+    repo.write("a.py", "def fetch_report():\n    return 1\n");
+    assert!(repo.quarry(&["setup", "--yes"]).status.success());
+    assert!(fs::read_to_string(repo.0.join("AGENTS.md")).unwrap().contains("quarry search"));
+    let claude = fs::read_to_string(repo.0.join("CLAUDE.md")).unwrap();
+    assert!(claude.starts_with("# Mine\n\n## Code search") && claude.contains("quarry search"), "{claude}");
+    assert!(repo.0.join(".quarry/index").is_file());
+    let out = String::from_utf8(repo.quarry(&["setup", "--yes"]).stdout).unwrap();
+    assert!(out.contains("already mention quarry"), "{out}");
 }

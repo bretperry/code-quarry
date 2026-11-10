@@ -17,7 +17,8 @@ Your agent doesn't need to read 40 files to find the retry logic. It needs the r
 
 - **Saves tokens.** Your agent reads the five functions that matter, not the whole files around them.
 - **Nothing to run.** No Docker, no database, no model download, no API key. A search takes about 21 ms.
-- **Keeps quiet about secrets.** Detected secrets are cut from everything it stores and prints. It's a second layer, not a vault: see the fine print below.
+- **Keeps secrets out of its output.** Detected secrets are cut from everything quarry stores and prints, checked twice.
+- **Works with any AI agent.** One command adds the rule to `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Cursor, Copilot, Cline, Windsurf, Kiro and Roo rules.
 
 ## Dig in
 
@@ -25,7 +26,7 @@ Your agent doesn't need to read 40 files to find the retry logic. It needs the r
 npm install -g code-quarry                         # prebuilt: macOS/Linux x64+arm64, Windows x64
 # or from source: cd rust && cargo install --path .
 cd ~/Dev/some-repo
-quarry index .                                     # writes .quarry/index, ignored by git
+quarry setup                                       # tells your agents about quarry, builds .quarry/index
 quarry search "where do we retry failed requests"
 quarry search "auth" -k 10 --lines 40              # more results, shorter bodies
 ```
@@ -39,18 +40,40 @@ const stale = (held, now) => ...
 
 ## Hand it to your agent
 
-Add this to `CLAUDE.md` (or your agent's equivalent):
+Run `quarry setup` in the repo. It shows what it will write and asks first (`--yes` skips the question).
 
-> To find where something lives in this repo, run `quarry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. If it reports nothing indexed, run `quarry index .` first. Re-run that after large changes.
+- **`AGENTS.md`, always.** Codex, Cursor, Copilot, Amp, Zed, OpenCode, Jules and others read it.
+- **Each agent's own rules file, when that agent is in use:** `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, `.cursor/rules/`, `.windsurf/rules/`, `.clinerules`, `.kiro/steering/`, `.roo/rules/`.
+- **Your existing rules stay.** The quarry rule is added at the end, once. Running setup again changes nothing.
 
-## Secrets: the fine print
+The rule it adds:
 
-### What it can't promise
+> To find where something lives in this repo, run `quarry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. It re-indexes by itself when files change.
 
-An agent **can still read secrets** with this tool installed. quarry only controls what quarry stores and prints.
+No hooks or MCP server needed: any agent that can run a shell command can use quarry. The index stays fresh on its own. Each search checks file times (milliseconds) and re-indexes when something changed (about a second). In a git repo with no index yet, the first search builds one.
 
-- **Other tools are outside it.** An agent with Read or a shell can open `.env` directly. A real block needs your agent's permission rules or hooks to deny those paths, and quarry doesn't change them.
-- **Detection misses things.** It finds shapes, not meaning. The list of what gets through is below.
+## Secrets: what quarry covers
+
+### What quarry guarantees
+
+- **The index stores no source text.** It holds paths, line numbers, symbol names, hashed keywords, and small vectors. All are made from text after redaction.
+- **Redaction runs twice.** Once before indexing, and again on the live file at every search, so an old index can't leak and a secret added after indexing is still caught.
+- **It fails closed.** If redaction panics or won't settle, that file is withheld. Non-UTF-8 files, files with NUL bytes, symlinks, paths leading out of the repo, and files over 500 KB are never read. An index from another version or a different redactor is refused.
+- **Sensitive files are skipped by path**, at index and at search: `.env*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.tfvars`, `*.tfstate`, `id_rsa`, `.npmrc`, `.netrc`, `.ssh/`, `.aws/`, `secrets/`, `keys/`, `private/`, `vault/`, and any filename containing `secret`, `credential`, `password`, `apikey`, or `service-account`. A real code file with such a name, like `secrets_manager.py`, isn't searchable.
+
+<details>
+<summary><b>What it detects</b></summary>
+
+About 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, Google, npm, PyPI, and others), JWTs, Telegram bot tokens, webhook URLs, private key blocks, passwords and tokens in URLs, `Bearer` and `Basic` values, high-entropy strings, and values assigned to sensitive names (`password`, `token`, `api_key`, and so on). It leans toward over-redacting: about 0.9% of lines across three real repos, mostly test fixtures, config labels, and comments that mention tokens, where it can take the rest of the line.
+
+</details>
+
+### Where its job ends
+
+quarry protects what passes through quarry. An agent that skips quarry and opens files itself (with Read, `cat`, or any shell command) can still see secrets. Blocking that is the job of your agent's permission rules.
+
+- **Other tools are outside it.** To stop an agent opening `.env` directly, deny those paths in its permission rules or hooks.
+- **Detection reads shapes, not meaning.** A secret that looks like ordinary code can pass. The cases are listed below.
 
 <details>
 <summary><b>What slips past detection</b></summary>
@@ -65,21 +88,7 @@ An agent **can still read secrets** with this tool installed. quarry only contro
 
 </details>
 
-Treat it as a second layer, and keep secrets out of source.
-
-### What it does guarantee
-
-- **The index stores no source text.** It holds paths, line numbers, symbol names, hashed keywords, and small vectors. All are made from text after redaction.
-- **Redaction runs twice.** Once before indexing, and again on the live file at every search, so an old index can't leak and a secret added after indexing is still caught.
-- **It fails closed.** If redaction panics or won't settle, that file is withheld. Non-UTF-8 files, files with NUL bytes, symlinks, paths leading out of the repo, and files over 500 KB are never read. An index from another version or a different redactor is refused.
-- **Sensitive files are skipped by path**, at index and at search: `.env*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.tfvars`, `*.tfstate`, `id_rsa`, `.npmrc`, `.netrc`, `.ssh/`, `.aws/`, `secrets/`, `keys/`, `private/`, `vault/`, and any filename containing `secret`, `credential`, `password`, `apikey`, or `service-account`. A real code file with such a name, like `secrets_manager.py`, isn't searchable.
-
-<details>
-<summary><b>What it detects</b></summary>
-
-About 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, Google, npm, PyPI, and others), JWTs, Telegram bot tokens, webhook URLs, private key blocks, passwords and tokens in URLs, `Bearer` and `Basic` values, high-entropy strings, and values assigned to sensitive names (`password`, `token`, `api_key`, and so on). It leans toward over-redacting: about 0.9% of lines across three real repos, mostly test fixtures, config labels, and comments that mention tokens, where it can take the rest of the line.
-
-</details>
+Keep secrets out of source too; quarry is one layer of several.
 
 ## Under the hood
 
@@ -91,7 +100,7 @@ About 50 token prefixes (AWS, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, 
 - **Call links:** at index time, tree-sitter finds each call and links it to the function of that name: same file first, and skipped when more than 3 functions share the name. The index stores only the links, as chunk numbers. A call on a line that redaction changed is not linked.
 - **Model:** 27,628 tokens by 64 dimensions, stored as `i8`, compiled into the binary. Built from `BAAI/bge-small-en-v1.5` (MIT, notice in `rust/model/LICENSE`) by `tools/build_model.py`, with the model2vec recipe. No neural network runs at search time.
 - **Search reads the live file**, so code is current. If a file changed since indexing, the function is found again by name. If it's gone, the result says to re-index.
-- **Every `index` run rebuilds the whole index.** It takes about 1.3 seconds per repo.
+- **Every index build is a full rebuild.** It takes about 1.3 seconds per repo. `search` triggers one when a file it would read is newer than the index, or an indexed file is gone; `--no-refresh` skips that.
 
 </details>
 

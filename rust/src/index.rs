@@ -202,6 +202,25 @@ fn link_calls(chunks: &mut [ChunkEntry], calls: &[Vec<String>]) {
 
 pub fn run(repo: PathBuf) -> Result<(), String> {
     let repo = repo.canonicalize().map_err(|e| format!("no such folder: {}: {e}", repo.display()))?;
+    crate::emit(&build(&repo)?);
+    Ok(())
+}
+
+/// True when a file the index would read changed after the index was written, or an indexed file
+/// is gone. Only stats files, so it costs milliseconds next to a rebuild's second.
+pub fn is_stale(repo: &Path, index: &Index) -> bool {
+    let Ok(built) = fs::metadata(store::index_path(repo)).and_then(|m| m.modified()) else { return true };
+    let changed = list_files(repo).iter().any(|rel| {
+        !redact::is_sensitive_path(rel)
+            && Path::new(rel).extension().and_then(|e| e.to_str()).and_then(chunk::lang_for).is_some()
+            && fs::symlink_metadata(repo.join(rel)).and_then(|m| m.modified()).is_ok_and(|t| t > built)
+    });
+    changed || index.files.iter().any(|f| !repo.join(&f.path).exists())
+}
+
+/// Builds and saves the index for `repo` (already canonical) and returns a one-line summary.
+pub fn build(repo: &Path) -> Result<String, String> {
+    let repo = repo.to_path_buf();
     let model = embed::Model::load();
     let mut index = Index::default();
     let mut pending = Vec::new();
@@ -287,14 +306,13 @@ pub fn run(repo: PathBuf) -> Result<(), String> {
     }
     index.save(&repo)?;
     let bytes = fs::metadata(store::index_path(&repo)).map(|m| m.len()).unwrap_or(0);
-    crate::emit(&format!(
+    Ok(format!(
         "{}: {} files, {} chunks, {} KB. Skipped {sensitive} sensitive, withheld {withheld}.\n",
         repo.display(),
         index.files.len(),
         index.chunks.len(),
         bytes / 1024
-    ));
-    Ok(())
+    ))
 }
 
 #[cfg(test)]
