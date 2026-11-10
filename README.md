@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/bretperry/code-scry/dev/assets/banner-dark.svg">
-    <img alt="code-quarry: ask your codebase a question, get back the functions that answer it" src="https://raw.githubusercontent.com/bretperry/code-scry/dev/assets/banner-light.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/bretperry/code-quarry/dev/assets/banner-dark.svg">
+    <img alt="code-quarry: ask your codebase a question, get back the functions that answer it" src="https://raw.githubusercontent.com/bretperry/code-quarry/dev/assets/banner-light.svg" width="100%">
   </picture>
 </p>
 
@@ -10,7 +10,7 @@
   <img alt="6 MB, one binary" src="https://img.shields.io/badge/binary-6%20MB-d97706">
   <img alt="no network" src="https://img.shields.io/badge/network-none-5c5248">
   <img alt="macOS, Linux, Windows" src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-5c5248">
-  <a href="https://github.com/bretperry/code-scry/blob/dev/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-5c5248"></a>
+  <a href="https://github.com/bretperry/code-quarry/blob/dev/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-5c5248"></a>
 </p>
 
 Your agent doesn't need to read 40 files to find the retry logic. It needs the retry logic. `quarry` digs it out: plain-English search over every function in your repo, from one 6 MB binary that never touches the network.

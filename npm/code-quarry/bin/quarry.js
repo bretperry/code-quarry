@@ -16,7 +16,7 @@ try {
   console.error(
     `quarry: no prebuilt binary for ${process.platform}-${process.arch} (package ${pkg} is missing).\n` +
       "If your platform is supported, reinstall without --omit=optional / --no-optional.\n" +
-      "Otherwise build from source: https://github.com/bretperry/code-scry"
+      "Otherwise build from source: https://github.com/bretperry/code-quarry"
   );
   process.exit(1);
 }
