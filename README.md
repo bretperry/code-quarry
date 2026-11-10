@@ -16,7 +16,9 @@
 Your agent doesn't need to read 40 files to find the retry logic. It needs the retry logic. `quarry` digs it out: plain-English search over every function in your repo, from one 6 MB binary that never touches the network.
 
 - **Saves tokens.** Your agent reads the five functions that matter, not the whole files around them.
-- **Nothing to run.** No Docker, no database, no model download, no API key. A search takes about 21 ms.
+- **Blazing fast.** A search takes about 21 ms, model included. Indexing a whole repo takes about a second.
+- **No MCP server, so no context tax.** MCP tools load their definitions into every session, used or not. quarry is a plain command: it costs one short line in your rules file and nothing else until your agent runs it.
+- **Nothing to run.** No Docker, no database, no model download, no API key.
 - **Keeps secrets out of its output.** Detected secrets are cut from everything quarry stores and prints, checked twice.
 - **Works with any AI agent.** One command adds the rule to `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Cursor, Copilot, Cline, Windsurf, Kiro and Roo rules.
 
