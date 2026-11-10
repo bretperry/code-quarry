@@ -35,14 +35,23 @@ for (const p of platforms) {
   cpSync(join(root, "LICENSE"), join(out, "LICENSE"));
   cpSync(join(root, "rust/model/LICENSE"), join(out, "MODEL-LICENSE"));
   writeFileSync(
+    join(out, "README.md"),
+    `# ${p.pkg}\n\nThe \`quarry\` program for ${p.for}.\n\n` +
+      "**You don't need to install this package yourself.** Install the main package instead:\n\n" +
+      "```bash\nnpm install -g code-quarry\n```\n\n" +
+      "npm then downloads only the one package that matches your computer.\n\n" +
+      `What quarry is and how to use it: ${main.homepage}\n`
+  );
+  writeFileSync(
     join(out, "package.json"),
     JSON.stringify(
       {
         name: p.pkg,
         version,
-        description: `quarry binary for ${p.os}-${p.cpu}`,
+        description: `The quarry program for ${p.for}. Install code-quarry instead; npm picks this one for you.`,
         license: "MIT",
         repository: main.repository,
+        homepage: main.homepage,
         os: [p.os],
         cpu: [p.cpu],
         files: ["bin", "LICENSE", "MODEL-LICENSE"],

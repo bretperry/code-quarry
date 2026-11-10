@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "Plain-English code search for AI agents. Returns the functions that answer a question, not whole files, to save tokens. One small binary, no network, secrets redacted.",
   "license": "MIT",
+  "homepage": "https://github.com/bretperry/code-quarry#readme",
   "repository": { "type": "git", "url": "git+https://github.com/bretperry/code-quarry.git" },
   "keywords": ["code-search", "semantic-search", "cli", "tree-sitter", "agents", "ai", "llm", "tokens"],
   "bin": { "quarry": "bin/quarry.js" },
