@@ -2,6 +2,7 @@
 
 Plain-English code search in one 6 MB binary. No Docker, no database, no download, no network.
 Results include the function's code, with detected secrets removed.
+An agent reads the few functions that answer its question instead of whole files, so each lookup spends fewer tokens.
 
 ```bash
 npm install -g code-quarry                         # prebuilt: macOS/Linux x64+arm64, Windows x64
