@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{embed, redact};
 
-const DIR: &str = ".code-scry";
+const DIR: &str = ".quarry";
 const FILE: &str = "index";
 const MAGIC: &[u8; 4] = b"CSRY";
 const FORMAT: u32 = 3;
@@ -107,7 +107,7 @@ impl Index {
     pub fn load(root: &Path) -> Result<Index, String> {
         let path = index_path(root);
         let bytes = fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        Self::parse(&bytes).ok_or_else(|| "index is from another version or damaged. Run: code-scry index .".to_string())
+        Self::parse(&bytes).ok_or_else(|| "index is from another version or damaged. Run: quarry index .".to_string())
     }
 
     fn parse(bytes: &[u8]) -> Option<Index> {

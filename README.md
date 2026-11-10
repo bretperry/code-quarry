@@ -1,15 +1,15 @@
-# code-scry
+# code-quarry
 
 Plain-English code search in one 6 MB binary. No Docker, no database, no download, no network.
 Results include the function's code, with detected secrets removed.
 
 ```bash
-npm install -g code-scry-cli                       # prebuilt: macOS/Linux x64+arm64, Windows x64
+npm install -g code-quarry                         # prebuilt: macOS/Linux x64+arm64, Windows x64
 # or from source: cd rust && cargo install --path .
 cd ~/Dev/some-repo
-code-scry index .                                  # writes .code-scry/index, ignored by git
-code-scry search "where do we retry failed requests"
-code-scry search "auth" -k 10 --lines 40           # more results, shorter bodies
+quarry index .                                     # writes .quarry/index, ignored by git
+quarry search "where do we retry failed requests"
+quarry search "auth" -k 10 --lines 40              # more results, shorter bodies
 ```
 
 Output, one block per result:
@@ -21,9 +21,9 @@ const stale = (held, now) => ...
 
 ## What it can't promise
 
-An agent **can still read secrets** with this tool installed. code-scry only controls what code-scry stores and prints.
+An agent **can still read secrets** with this tool installed. quarry only controls what quarry stores and prints.
 
-- **Other tools are outside it.** An agent with Read or a shell can open `.env` directly. A real block needs your agent's permission rules or hooks to deny those paths, and code-scry doesn't change them.
+- **Other tools are outside it.** An agent with Read or a shell can open `.env` directly. A real block needs your agent's permission rules or hooks to deny those paths, and quarry doesn't change them.
 - **Detection misses things.** It finds shapes, not meaning. These get through:
   - A short, ordinary string under an ordinary name: `x = "hunter2"`.
   - An unquoted word with no digit: `password = hunter`, which reads as a variable.
@@ -86,4 +86,4 @@ It now matches the neural version's 16 of 30 in the top 5. Indexing the comment 
 
 Add to `CLAUDE.md`:
 
-> To find where something lives in this repo, run `code-scry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. If it reports nothing indexed, run `code-scry index .` first. Re-run that after large changes.
+> To find where something lives in this repo, run `quarry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. If it reports nothing indexed, run `quarry index .` first. Re-run that after large changes.

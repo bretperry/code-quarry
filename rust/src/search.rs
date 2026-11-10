@@ -127,11 +127,11 @@ fn print_hit(root: &Path, index: &Index, c: &ChunkEntry, score: f32, max_lines: 
             Some((start, end)) => {
                 crate::emit(&format!("{}\n{}", header(&format!(":{start}-{end}")), body_of(&source.clean, start, end, max_lines)));
             }
-            None => crate::emit(&format!("{}\n[gone from the file since indexing. Run: code-scry index .]\n", header(""))),
+            None => crate::emit(&format!("{}\n[gone from the file since indexing. Run: quarry index .]\n", header(""))),
         },
         Err(Refused::Sensitive) => crate::emit(&format!("{}\n[withheld: sensitive file]\n", header(""))),
         Err(Refused::Withheld) => crate::emit(&format!("{}\n[withheld: could not redact this file]\n", header(""))),
-        Err(Refused::Unreadable) => crate::emit(&format!("{}\n[file unreadable. Run: code-scry index .]\n", header(""))),
+        Err(Refused::Unreadable) => crate::emit(&format!("{}\n[file unreadable. Run: quarry index .]\n", header(""))),
     }
 }
 
@@ -141,7 +141,7 @@ pub fn run(query: String, repo: Option<std::path::PathBuf>, k: usize, max_lines:
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
     let start = start.canonicalize().map_err(|e| format!("no such folder: {}: {e}", start.display()))?;
-    let root = store::find_root(&start).ok_or("Nothing indexed here. Run: code-scry index .")?;
+    let root = store::find_root(&start).ok_or("Nothing indexed here. Run: quarry index .")?;
     let index = Index::load(&root)?;
     let model = embed::Model::load();
 

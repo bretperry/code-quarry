@@ -1,11 +1,11 @@
 {
-  "name": "code-scry-cli",
+  "name": "code-quarry",
   "version": "0.0.0",
   "description": "Plain-English code search in one small binary. No database, no network, secrets redacted.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/bretperry/code-scry.git" },
   "keywords": ["code-search", "semantic-search", "cli", "tree-sitter", "agents"],
-  "bin": { "code-scry": "bin/code-scry.js" },
+  "bin": { "quarry": "bin/quarry.js" },
   "files": ["bin", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "optionalDependencies": {}

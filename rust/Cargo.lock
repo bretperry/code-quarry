@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "code-scry"
+name = "code-quarry"
 version = "0.2.0"
 dependencies = [
  "tree-sitter",

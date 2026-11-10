@@ -1,4 +1,4 @@
-# Builds code-scry for each platform in npm/platforms.json and publishes it to npm.
+# Builds quarry (npm: code-quarry) for each platform in npm/platforms.json and publishes it to npm.
 # Trigger: push a tag vX.Y.Z matching rust/Cargo.toml's version.
 # Needs repo secret NPM_TOKEN (npm automation or granular token with publish rights).
 # Public repo: hosted runners are free here.
@@ -46,7 +46,7 @@ jobs:
       - name: Smoke test
         if: matrix.smoke
         run: |
-          exe=rust/target/${{ matrix.target }}/release/code-scry
+          exe=rust/target/${{ matrix.target }}/release/quarry
           [ -f "$exe.exe" ] && exe="$exe.exe"
           "$exe" index .
           "$exe" search "redact secrets from a line" -k 3 | tee out.txt
@@ -54,7 +54,7 @@ jobs:
       - name: Collect binary
         run: |
           mkdir -p bin/${{ matrix.target }}
-          cp rust/target/${{ matrix.target }}/release/code-scry* bin/${{ matrix.target }}/
+          cp rust/target/${{ matrix.target }}/release/quarry* bin/${{ matrix.target }}/
           rm -f bin/${{ matrix.target }}/*.d bin/${{ matrix.target }}/*.pdb
       - uses: actions/upload-artifact@v4
         with:
@@ -88,14 +88,14 @@ jobs:
           echo "v=$v" >> "$GITHUB_OUTPUT"
       - run: node npm/stage.mjs ${{ steps.version.outputs.v }} bin
       - name: Require every platform
-        run: test "$(ls -d npm/dist/code-scry-*/ | wc -l)" -eq "$(node -p 'require("./npm/platforms.json").length')"
+        run: test "$(ls -d npm/dist/code-quarry-*/ | wc -l)" -eq "$(node -p 'require("./npm/platforms.json").length')"
       - name: Publish
         if: github.ref_type == 'tag' || inputs.publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # Platform packages first, so the main package never points at missing versions.
-          for d in npm/dist/code-scry-*/ npm/dist/code-scry/; do
+          for d in npm/dist/code-quarry-*/ npm/dist/code-quarry/; do
             name=$(node -p "require('./$d/package.json').name")
             if npm view "$name@${{ steps.version.outputs.v }}" version >/dev/null 2>&1; then
               echo "$name@${{ steps.version.outputs.v }} already published, skipping"; continue

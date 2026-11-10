@@ -14,7 +14,7 @@ struct Repo(PathBuf);
 impl Repo {
     fn new() -> Repo {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("code-scry-e2e-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("quarry-e2e-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Repo(dir)
     }
@@ -26,7 +26,7 @@ impl Repo {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let out = Command::new(env!("CARGO_BIN_EXE_code-scry")).args(args).current_dir(&self.0).output().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_quarry")).args(args).current_dir(&self.0).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         out
     }
@@ -36,7 +36,7 @@ impl Repo {
     }
 
     fn index_bytes(&self) -> Vec<u8> {
-        fs::read(self.0.join(".code-scry/index")).unwrap()
+        fs::read(self.0.join(".quarry/index")).unwrap()
     }
 }
 
@@ -195,7 +195,7 @@ fn a_reader_that_stops_early_is_not_an_error() {
         repo.write(&format!("f{i}.py"), &format!("def fetch_report_{i}():\n{lines}"));
     }
     repo.run(&["index", "."]);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_code-scry"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_quarry"))
         .args(["search", "fetch report", "-k", "40"])
         .current_dir(&repo.0)
         .stdout(Stdio::piped())
@@ -222,7 +222,7 @@ fn search_finds_the_index_from_a_subfolder() {
     let repo = Repo::new();
     repo.write("src/deep/a.py", "def fetch_report():\n    return 1\n");
     repo.run(&["index", "."]);
-    let out = Command::new(env!("CARGO_BIN_EXE_code-scry"))
+    let out = Command::new(env!("CARGO_BIN_EXE_quarry"))
         .args(["search", "fetch report"])
         .current_dir(repo.0.join("src/deep"))
         .output()
@@ -233,9 +233,9 @@ fn search_finds_the_index_from_a_subfolder() {
 #[test]
 fn nothing_indexed_is_a_clear_error() {
     let repo = Repo::new();
-    let out = Command::new(env!("CARGO_BIN_EXE_code-scry")).args(["search", "x"]).current_dir(&repo.0).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_quarry")).args(["search", "x"]).current_dir(&repo.0).output().unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("code-scry index"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("quarry index"));
 }
 
 #[test]
@@ -243,11 +243,11 @@ fn a_damaged_index_is_refused() {
     let repo = Repo::new();
     repo.write("a.py", "def fetch_report():\n    return 1\n");
     repo.run(&["index", "."]);
-    let path = repo.0.join(".code-scry/index");
+    let path = repo.0.join(".quarry/index");
     let mut bytes = fs::read(&path).unwrap();
     bytes.truncate(bytes.len() - 1);
     fs::write(&path, bytes).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_code-scry")).args(["search", "x"]).current_dir(&repo.0).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_quarry")).args(["search", "x"]).current_dir(&repo.0).output().unwrap();
     assert!(!out.status.success());
 }
 
@@ -256,7 +256,7 @@ fn the_index_is_gitignored_by_itself() {
     let repo = Repo::new();
     repo.write("a.py", "def f():\n    return 1\n");
     repo.run(&["index", "."]);
-    assert_eq!(fs::read_to_string(repo.0.join(".code-scry/.gitignore")).unwrap(), "*\n");
+    assert_eq!(fs::read_to_string(repo.0.join(".quarry/.gitignore")).unwrap(), "*\n");
 }
 
 #[test]

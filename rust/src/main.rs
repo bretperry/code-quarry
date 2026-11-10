@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-code-scry: plain-English code search. Secrets are stripped by detection; see README for limits.
+quarry: plain-English code search. Secrets are stripped by detection; see README for limits.
 
-  code-scry index [folder]                       build .code-scry/index (default: .)
-  code-scry search <question...> [options]       print the best functions with their code
+  quarry index [folder]                       build .quarry/index (default: .)
+  quarry search <question...> [options]       print the best functions with their code
       -k <n>         results (default 5)
       --lines <n>    code lines per result (default: the whole function, capped)
       --repo <dir>   folder to search from (default: current folder)
@@ -28,7 +28,7 @@ pub fn emit(text: &str) {
         if e.kind() == io::ErrorKind::BrokenPipe {
             std::process::exit(0);
         }
-        eprintln!("code-scry: writing output: {e}");
+        eprintln!("quarry: writing output: {e}");
         std::process::exit(1);
     }
 }
@@ -68,7 +68,7 @@ fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
 
 fn main() -> ExitCode {
     // Rust's default panic message can quote the string being sliced, which might hold a secret.
-    std::panic::set_hook(Box::new(|_| eprintln!("code-scry: internal error")));
+    std::panic::set_hook(Box::new(|_| eprintln!("quarry: internal error")));
     match dispatch(std::env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -8,7 +8,7 @@ use crate::store::{ChunkEntry, FileEntry, Index, KINDS};
 use crate::{embed, redact, store, terms};
 
 const SKIP_DIRS: &[&str] = &[
-    ".git", ".code-scry", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", "target", "vendor",
+    ".git", ".quarry", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", "target", "vendor",
 ];
 pub const MAX_FILE_BYTES: u64 = 500_000;
 const MAX_EMBED_CHARS: usize = 2000;

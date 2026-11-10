@@ -1,8 +1,12 @@
 [package]
-name = "code-scry"
+name = "code-quarry"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+
+[[bin]]
+name = "quarry"
+path = "src/main.rs"
 
 [dependencies]
 tree-sitter = "0.27.1"

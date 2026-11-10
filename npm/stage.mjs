@@ -1,6 +1,6 @@
 // Builds publishable package dirs under npm/dist from compiled binaries.
 // Usage: node npm/stage.mjs <version> <binaries-dir>
-// <binaries-dir>/<rust-target>/code-scry[.exe] for each platform in platforms.json.
+// <binaries-dir>/<rust-target>/quarry[.exe] for each platform in platforms.json.
 // Platforms whose binary is missing are skipped and left out of optionalDependencies.
 import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,14 +15,14 @@ if (!version || !binDir) {
 }
 
 const platforms = JSON.parse(readFileSync(join(here, "platforms.json"), "utf8"));
-const main = JSON.parse(readFileSync(join(here, "code-scry/package.json"), "utf8"));
+const main = JSON.parse(readFileSync(join(here, "code-quarry/package.json"), "utf8"));
 const dist = join(here, "dist");
 rmSync(dist, { recursive: true, force: true });
 
 main.version = version;
 main.optionalDependencies = {};
 for (const p of platforms) {
-  const exe = p.os === "win32" ? "code-scry.exe" : "code-scry";
+  const exe = p.os === "win32" ? "quarry.exe" : "quarry";
   const src = join(binDir, p.target, exe);
   if (!existsSync(src)) {
     console.warn(`skip ${p.pkg}: ${src} not found`);
@@ -40,7 +40,7 @@ for (const p of platforms) {
       {
         name: p.pkg,
         version,
-        description: `code-scry binary for ${p.os}-${p.cpu}`,
+        description: `quarry binary for ${p.os}-${p.cpu}`,
         license: "MIT",
         repository: main.repository,
         os: [p.os],
@@ -55,9 +55,9 @@ for (const p of platforms) {
   console.log(`staged ${p.pkg}`);
 }
 
-const mainOut = join(dist, "code-scry");
-cpSync(join(here, "code-scry"), mainOut, { recursive: true });
+const mainOut = join(dist, "code-quarry");
+cpSync(join(here, "code-quarry"), mainOut, { recursive: true });
 cpSync(join(root, "README.md"), join(mainOut, "README.md"));
 cpSync(join(root, "LICENSE"), join(mainOut, "LICENSE"));
 writeFileSync(join(mainOut, "package.json"), JSON.stringify(main, null, 2) + "\n");
-console.log(`staged code-scry ${version} with ${Object.keys(main.optionalDependencies).length} platforms`);
+console.log(`staged code-quarry ${version} with ${Object.keys(main.optionalDependencies).length} platforms`);
