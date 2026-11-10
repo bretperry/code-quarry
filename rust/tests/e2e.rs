@@ -353,3 +353,19 @@ fn setup_with_yes_adds_the_rule_and_indexes() {
     let out = String::from_utf8(repo.quarry(&["setup", "--yes"]).stdout).unwrap();
     assert!(out.contains("already mention quarry"), "{out}");
 }
+
+#[test]
+fn help_works_for_every_command_and_mistakes_point_to_it() {
+    let repo = Repo::new();
+    for args in [&["help"][..], &["--help"], &["help", "search"], &["search", "--help"], &["setup", "-h"], &["index", "--help"]] {
+        let out = repo.quarry(args);
+        assert!(out.status.success() && !out.stdout.is_empty(), "{args:?}");
+    }
+    let out = repo.quarry(&["search"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("quarry help search"));
+    let out = repo.quarry(&["retry", "logic"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("quarry search \"retry logic\""));
+    let version = String::from_utf8(repo.quarry(&["--version"]).stdout).unwrap();
+    assert_eq!(version, format!("quarry {}\n", env!("CARGO_PKG_VERSION")));
+}

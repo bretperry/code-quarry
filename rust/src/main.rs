@@ -1,5 +1,6 @@
 mod chunk;
 mod embed;
+mod help;
 mod index;
 mod redact;
 mod search;
@@ -11,17 +12,6 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "\
-quarry: plain-English code search. Secrets are stripped by detection; see README for limits.
-
-  quarry setup [folder] [--yes]               tell this repo's AI agents to use quarry (asks first)
-  quarry search <question...> [options]       print the best functions with their code
-      -k <n>         results (default 5)
-      --lines <n>    code lines per result (default: the whole function, capped)
-      --repo <dir>   folder to search from (default: current folder)
-      --no-refresh   skip re-indexing when files changed
-  quarry index [folder]                       build .quarry/index (default: .); search does this itself in a git repo
-";
 
 /// Writes to stdout. A reader that stopped early (`| head`) is normal, so that ends the run with
 /// success; `println!` would panic there.
@@ -36,29 +26,50 @@ pub fn emit(text: &str) {
     }
 }
 
-fn number(v: Option<String>, flag: &str) -> Result<usize, String> {
-    v.and_then(|s| s.parse().ok()).ok_or_else(|| format!("{flag} needs a number"))
+/// A usage mistake: what went wrong, then where to read more.
+fn misuse(what: &str, command: &str) -> String {
+    format!("quarry: {what}\nRun `quarry help {command}` for how to use it.")
+}
+
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--help")
 }
 
 fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
-    match args.next().as_deref() {
+    let command = args.next();
+    let rest: Vec<String> = args.collect();
+    if let Some(c) = command.as_deref().filter(|_| wants_help(&rest)) {
+        if let Some(text) = help::for_command(c) {
+            emit(text);
+            return Ok(());
+        }
+    }
+    let mut args = rest.into_iter();
+    match command.as_deref() {
         Some("index") => {
             let repo = args.next().unwrap_or_else(|| ".".into());
+            if let Some(extra) = args.next() {
+                return Err(misuse(&format!("index takes one folder, got also \"{extra}\""), "index"));
+            }
             index::run(PathBuf::from(repo))
         }
         Some("search") => {
             let (mut words, mut repo, mut k, mut lines, mut refresh) = (Vec::new(), None, 5, None, true);
+            let number = |v: Option<String>, flag: &str| {
+                v.and_then(|s| s.parse().ok()).ok_or_else(|| misuse(&format!("{flag} needs a number"), "search"))
+            };
             while let Some(a) = args.next() {
                 match a.as_str() {
                     "-k" => k = number(args.next(), "-k")?,
                     "--lines" => lines = Some(number(args.next(), "--lines")?),
                     "--no-refresh" => refresh = false,
-                    "--repo" => repo = Some(PathBuf::from(args.next().ok_or("--repo needs a folder")?)),
+                    "--repo" => repo = Some(PathBuf::from(args.next().ok_or_else(|| misuse("--repo needs a folder", "search"))?)),
+                    _ if a.starts_with("--") => return Err(misuse(&format!("unknown option {a}"), "search")),
                     _ => words.push(a),
                 }
             }
             if words.is_empty() {
-                return Err(USAGE.into());
+                return Err(misuse("search needs a question, like: quarry search \"where do we parse dates\"", "search"));
             }
             search::run(words.join(" "), repo, k, lines, refresh)
         }
@@ -67,17 +78,35 @@ fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             for a in args {
                 match a.as_str() {
                     "-y" | "--yes" => yes = true,
+                    _ if a.starts_with('-') => return Err(misuse(&format!("unknown option {a}"), "setup")),
                     _ if folder.is_none() => folder = Some(PathBuf::from(a)),
-                    _ => return Err(USAGE.into()),
+                    _ => return Err(misuse("setup takes one folder", "setup")),
                 }
             }
             setup::run(folder.unwrap_or_else(|| ".".into()), yes)
         }
-        Some("-h" | "--help" | "help") => {
-            emit(USAGE);
+        Some("help") => match args.next() {
+            None => {
+                emit(help::MAIN);
+                Ok(())
+            }
+            Some(c) => {
+                emit(help::for_command(&c).ok_or_else(|| format!("quarry: no command \"{c}\". Run `quarry help`."))?);
+                Ok(())
+            }
+        },
+        None | Some("-h" | "--help") => {
+            emit(help::MAIN);
             Ok(())
         }
-        _ => Err(USAGE.into()),
+        Some("version" | "-V" | "--version") => {
+            emit(&format!("quarry {}\n", help::VERSION));
+            Ok(())
+        }
+        Some(c) => Err(format!(
+            "quarry: no command \"{c}\". To search, run: quarry search \"{c}{}\"\nRun `quarry help` for all commands.",
+            args.map(|a| format!(" {a}")).collect::<String>()
+        )),
     }
 }
 
