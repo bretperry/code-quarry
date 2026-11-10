@@ -1,0 +1,36 @@
+# Removes whole npm packages with the CI token, so no one has to pass npm's 2FA by hand.
+# npm allows this within 72 hours of a package's first publish, or later when nothing depends on it.
+name: npm unpublish
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Package names to remove completely, separated by spaces
+        required: true
+      confirm:
+        description: Type "unpublish" to confirm. This cannot be undone.
+        required: true
+
+jobs:
+  unpublish:
+    if: inputs.confirm == 'unpublish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Unpublish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          for p in $PACKAGES; do
+            if ! npm view "$p" name >/dev/null 2>&1; then
+              echo "$p is not on npm, skipping"; continue
+            fi
+            npm unpublish "$p" --force
+          done
