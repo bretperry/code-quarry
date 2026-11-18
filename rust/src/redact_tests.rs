@@ -303,3 +303,67 @@ fn sensitive_paths() {
         assert!(!is_sensitive_path(p), "{p}");
     }
 }
+
+#[test]
+fn yaml_values_under_a_secret_name_are_hidden_whole() {
+    for (input, want) in [
+        ("password: correct horse battery staple\n", "password: [REDACTED]\n"),
+        ("  - db_password:    two words here  # note\n", "  - db_password:    [REDACTED]\n"),
+        ("\"api_key\": plain words\n", "\"api_key\": [REDACTED]\n"),
+        ("password: hunter\n", "password: [REDACTED]\n"),
+        ("private_key: |\n  line one\n\n  line two\nafter: ok\n", "private_key: |\n  [REDACTED]\n\n  [REDACTED]\nafter: ok\n"),
+        ("tokens:\n  - one\n  - two words\nname: x\n", "tokens:\n  - [REDACTED]\n  - [REDACTED]\nname: x\n"),
+        ("passwords:\n- one\nname: x\n", "passwords:\n- [REDACTED]\nname: x\n"),
+    ] {
+        assert_eq!(clean(input).unwrap(), want, "{input:?}");
+    }
+}
+
+#[test]
+fn code_that_looks_like_yaml_stays_readable() {
+    for input in [
+        "struct A {\n    password: String,\n}\n",
+        "class B:\n    password: str\n    api_key: SecretStr\n    token: Optional[str]\n",
+        "interface C {\n  token: string;\n}\n",
+        "const o = {\n  password: getPassword(),\n};\n",
+        "auth:\n  user: bob\n  method: basic\n",
+        "password: ${DB_PASSWORD}\n",
+    ] {
+        assert_eq!(clean(input).unwrap(), input);
+    }
+}
+
+#[test]
+fn an_escaped_space_does_not_end_a_value() {
+    assert_eq!(clean("PASSWORD=abc\\ def\\ LEAK\n").unwrap(), "PASSWORD=[REDACTED]\n");
+    assert_eq!(clean("PASSWORD=abc\\ def more\n").unwrap(), "PASSWORD=[REDACTED] more\n");
+}
+
+#[test]
+fn xml_elements_under_a_secret_name_are_hidden() {
+    assert_eq!(clean("<password>LEAK</password>\n").unwrap(), "<password>[REDACTED]</password>\n");
+    assert_eq!(clean("<apiKey id=\"1\">LEAK two</apiKey>\n").unwrap(), "<apiKey id=\"1\">[REDACTED]</apiKey>\n");
+    assert_eq!(clean("<password/>\n<name>x</name>\n").unwrap(), "<password/>\n<name>x</name>\n");
+}
+
+#[test]
+fn arrays_under_a_secret_name_hide_every_literal() {
+    assert_eq!(clean("secret = [\n \"LEAK\",\n]\nother = [\"fine\"]\n").unwrap(), "secret = [\n [REDACTED],\n]\nother = [\"fine\"]\n");
+    assert_eq!(
+        clean("{\"tokens\": [\n  \"A1\",\n  [\"B2\"]\n], \"x\": [\"ok\"]}\n").unwrap(),
+        "{\"tokens\": [\n  [REDACTED],\n  [[REDACTED]]\n], \"x\": [\"ok\"]}\n"
+    );
+    assert_eq!(clean("tokens = [t for t in words]\n").unwrap(), "tokens = [t for t in words]\n");
+}
+
+#[test]
+fn env_files_under_other_names_are_sensitive_and_templates_are_not() {
+    for p in ["app.env.txt", "prod.env.bak", "backup.env.txt", ".dev.vars", "x/.dev.vars.production", ".env", "a/prod.env"] {
+        assert!(is_sensitive_path(p), "{p}");
+    }
+    for p in [".env.example", ".env.local.sample", "app/.env.template", "environment.ts", "my.envelope.js"] {
+        assert!(!is_sensitive_path(p), "{p}");
+    }
+    // A template suffix exempts only the .env rule.
+    assert!(is_sensitive_path("secrets.json.example"));
+}

@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 type Spans = Vec<Range<usize>>;
 
@@ -126,6 +126,15 @@ const SENSITIVE_NAME_PARTS: &[&str] = &[
     "api-key", "serviceaccount", "service_account", "service-account", ".tfstate",
 ];
 
+/// A `.env` file's name ending in one of these is a template with no secrets.
+const ENV_TEMPLATE_SUFFIXES: &[&str] = &[".example", ".sample", ".template"];
+
+/// A name holding `.env` as a dotted part (`.env`, `.env.local`, `prod.env`, `app.env.txt`), or
+/// Cloudflare's `.dev.vars`.
+fn is_env_file_name(name: &str) -> bool {
+    name.starts_with(".env") || name.ends_with(".env") || name.contains(".env.") || name.starts_with(".dev.vars")
+}
+
 /// True when a repo-relative path should never be read, whatever it contains.
 pub fn is_sensitive_path(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();
@@ -134,8 +143,10 @@ pub fn is_sensitive_path(rel: &str) -> bool {
     if parts.iter().any(|p| SENSITIVE_DIRS.contains(p) || *p == "..") {
         return true;
     }
-    name.starts_with(".env")
-        || SENSITIVE_NAMES.contains(&name)
+    if is_env_file_name(name) {
+        return !ENV_TEMPLATE_SUFFIXES.iter().any(|s| name.ends_with(s));
+    }
+    SENSITIVE_NAMES.contains(&name)
         || name.rsplit_once('.').is_some_and(|(_, ext)| SENSITIVE_EXTENSIONS.contains(&ext))
         || SENSITIVE_NAME_PARTS.iter().any(|p| name.contains(p))
 }
@@ -634,11 +645,18 @@ fn is_primitive(lower: &str) -> bool {
     numeric || lower == "isize" || lower == "usize"
 }
 
+/// Where a bare value starting at `i` ends. A backslash-escaped character (`abc\ def`) is part of
+/// the value.
 fn bare_end(bytes: &[u8], i: usize) -> usize {
-    bytes[i..]
-        .iter()
-        .position(|b| b.is_ascii_whitespace() || matches!(b, b',' | b';' | b'&' | b')' | b'}' | b']' | b'"' | b'\'' | b'`'))
-        .map_or(bytes.len(), |e| i + e)
+    let mut j = i;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' if bytes.get(j + 1).is_some_and(|b| *b != b'\n') => j += 2,
+            b if b.is_ascii_whitespace() || matches!(b, b',' | b';' | b'&' | b')' | b'}' | b']' | b'"' | b'\'' | b'`') => return j,
+            _ => j += 1,
+        }
+    }
+    bytes.len()
 }
 
 fn is_env_name(name: &str) -> bool {
@@ -717,6 +735,13 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     let line_start = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
     let before = text[line_start..start].trim_start();
     let at_line_start = before.is_empty() || before == "export ";
+    // `<password>x</password>`
+    if start > 0 && bytes[start - 1] == b'<' {
+        spans.extend(xml_element_value(bytes, name_end));
+        return;
+    }
+    // A YAML key: the name opens its line, past any indent, list dashes, or a quote.
+    let yaml_key = before.bytes().all(|b| matches!(b, b'-' | b' ' | b'\t' | b'"' | b'\''));
 
     // Past a closing quote or bracket: `"password": ...`, `env["TOKEN"] = ...`.
     let mut i = name_end;
@@ -766,6 +791,13 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
             }
         }
     };
+    // `secret = [\n "x",\n]`, `"tokens": ["x", "y"]`: every literal in the array.
+    let v = skip_inline_space(bytes, after_op);
+    // One that closes on its own line is left to the line rules below (`[]byte("x")`).
+    if bytes.get(v) == Some(&b'[') && !bytes[v..line_end(bytes, v)].contains(&b']') {
+        array_literals(bytes, v, spans);
+        return;
+    }
     // A quoted value may sit on the next line: `password =\n    "x"`.
     let next_token = after_op + bytes[after_op..].iter().take_while(|b| b.is_ascii_whitespace()).count();
     let at_quote = matches!(bytes.get(next_token), Some(b'"' | b'\'' | b'`' | b'b' | b'r' | b'f' | b'u'))
@@ -773,7 +805,9 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     if literals_to_line_end(bytes, if at_quote { next_token } else { after_op }, spans) > 0 {
         return;
     }
-    let v = skip_inline_space(bytes, after_op);
+    if yaml_key && op_byte == b':' && after_op == after_name + 1 && yaml_value(text, line_start, v, spans) {
+        return;
+    }
     let end = bare_end(bytes, v);
     let value = &text[v..end];
     let tight = after_name == name_end && v == after_op;
@@ -803,6 +837,108 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     if bare_value_looks_literal(name, value, tight && op_byte == b'=') {
         spans.push(v..end);
     }
+}
+
+/// The text of `<name ...>text</name>`, from past the open tag's `>` to the next `<`.
+fn xml_element_value(bytes: &[u8], name_end: usize) -> Option<Range<usize>> {
+    let line = line_end(bytes, name_end);
+    let gt = bytes[name_end..line].iter().position(|b| *b == b'>').map(|p| name_end + p)?;
+    if gt > name_end && bytes[gt - 1] == b'/' {
+        return None;
+    }
+    let v = gt + 1;
+    let end = bytes[v..].iter().position(|b| *b == b'<').map_or(bytes.len(), |p| v + p);
+    (end > v).then_some(v..end)
+}
+
+/// Every quoted literal in the array opening at `open`, up to its matching `]`, across lines.
+fn array_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' | b'\'' | b'`' => {
+                if let Some(r) = quoted_value(bytes, i) {
+                    i = r.end.max(i + 1);
+                    if r.len() > 2 {
+                        spans.push(r);
+                    }
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Words a YAML-looking `name: value` line can end in that are a type or code, not a value:
+/// `password: str` in a Python class, `token: string` in TypeScript.
+const TYPE_WORDS: &[&str] = &[
+    "str", "string", "bool", "boolean", "int", "integer", "float", "number", "bytes", "any", "unknown", "object", "dict",
+    "list", "none", "null", "nil", "undefined", "true", "false", "~",
+];
+
+/// A YAML value after `name:` at the start of a line: the rest of the line, or for a block scalar
+/// (`|`, `>`) or a list, the more-indented lines below. Code that looks the same (`token: string`,
+/// `password: String,`, `key: str = "x"`) is left to the other rules. True when it took the line.
+fn yaml_value(text: &str, line_start: usize, v: usize, spans: &mut Spans) -> bool {
+    let bytes = text.as_bytes();
+    let end = line_end(bytes, v);
+    let value = text[v..end].trim_end();
+    let indent = bytes[line_start..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+    // Past a trailing comment: `password: |  # from vault`.
+    let head = if value.starts_with('#') { "" } else { value.split(" #").next().unwrap_or("").trim_end() };
+    let list_only = head.is_empty();
+    if list_only || matches!(head, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        let mut at = (end + 1).min(bytes.len());
+        let mut took = false;
+        while at < bytes.len() {
+            let stop = line_end(bytes, at);
+            let line = &text[at..stop];
+            let pad = line.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
+            if !line.trim().is_empty() && pad <= indent && !(list_only && pad == indent && line[pad..].starts_with("- ")) {
+                break;
+            }
+            let body = at + pad;
+            if list_only {
+                // Only list items: `- x` lines under the key. A nested mapping is not a value.
+                if !line.trim().is_empty() {
+                    if !line[pad..].starts_with('-') {
+                        break;
+                    }
+                    let item = skip_inline_space(bytes, body + 1);
+                    if item < stop {
+                        spans.push(item..stop);
+                    }
+                }
+            } else if body < stop {
+                spans.push(body..stop);
+            }
+            took = true;
+            at = stop + 1;
+        }
+        return took || !list_only;
+    }
+    let lower = value.to_ascii_lowercase();
+    let code = value.ends_with([',', ';', '{', '(', '[']) || value.starts_with(['$', '{', '[', '(', '&'])
+        || value.contains(" = ") || value.contains("=>") || value.contains("->") || value.contains("::")
+        || TYPE_WORDS.contains(&lower.as_str())
+        // A capitalized type with no digits: `SecretStr`, `Option<String>`, `Optional[str]`.
+        || (value.starts_with(|c: char| c.is_ascii_uppercase())
+            && value.bytes().all(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'<' | b'>' | b'[' | b']' | b'.')));
+    if code || value.starts_with(['"', '\'']) {
+        return false;
+    }
+    spans.push(v..v + value.len());
+    true
 }
 
 #[cfg(test)]
