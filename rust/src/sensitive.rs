@@ -52,9 +52,13 @@ const MAX_KEY_CHARS: usize = 64;
 const MAX_ENV_BYTES: u64 = 500_000;
 
 /// The key names in a `.env`-style file, in order, each once. Never a value, an `=`, or a line
-/// that is not `NAME=...`. Values that run over several lines are skipped whole.
+/// that is not `NAME=...`. Values that run over several lines (a quote, a key block, a trailing
+/// backslash) are skipped whole.
 pub fn env_keys(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut keys: Vec<String> = Vec::new();
+    // The previous line ended in a backslash, so this one is still its value.
+    let mut continued = false;
     // The quote that opened a value still running on later lines.
     let mut open: Option<char> = None;
     // An unquoted PEM block runs until its END line; its base64 lines can look like `NAME=`.
@@ -74,18 +78,32 @@ pub fn env_keys(text: &str) -> Vec<String> {
             }
             continue;
         }
+        let was_continued = continued;
+        continued = ends_in_backslash(line);
+        if was_continued {
+            continue;
+        }
         // Whatever the line is, a key block it opens hides the lines up to its end.
         in_pem = line.contains("-----BEGIN") && !line.contains("-----END");
         let line = line.trim();
+        if line.starts_with('#') {
+            continued = false;
+            continue;
+        }
         let line = line.strip_prefix("export ").map_or(line, str::trim_start);
         let Some((key, value)) = line.split_once('=') else { continue };
         let key = key.trim();
-        if !is_key(key) {
+        let value = value.trim_start();
+        // A quote that opens a value and doesn't close on this line runs on to later lines,
+        // whether or not the name before it is one this prints.
+        open = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')).filter(|q| !closes(&value[1..], *q));
+        if open.is_some() || in_pem {
+            continued = false;
+        }
+        // `abc==` is base64 padding, not a key with a value.
+        if !is_key(key) || value.starts_with('=') || (value.is_empty() && looks_encoded(key)) {
             continue;
         }
-        let value = value.trim_start();
-        // A quote that opens a value and doesn't close on this line runs on to later lines.
-        open = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')).filter(|q| !closes(&value[1..], *q));
         if redact::clean(key).as_deref() == Some(key) && !keys.iter().any(|k| k == key) {
             keys.push(key.to_string());
         }
@@ -106,11 +124,26 @@ fn closes(line: &str, quote: char) -> bool {
     false
 }
 
+/// An identifier: `[A-Za-z_][A-Za-z0-9_.]*`, not too long.
 fn is_key(key: &str) -> bool {
     let mut chars = key.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && key.chars().count() <= MAX_KEY_CHARS
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+}
+
+/// Upper case, lower case and digits mixed with no separator: base64 like `c2VjcmV0cGFzc3dvcmQ=`,
+/// not a name like `API_KEY` or `port2`.
+fn looks_encoded(key: &str) -> bool {
+    key.bytes().any(|b| b.is_ascii_uppercase())
+        && key.bytes().any(|b| b.is_ascii_lowercase())
+        && key.bytes().any(|b| b.is_ascii_digit())
+        && !key.contains(['_', '.'])
+}
+
+/// True when `line` ends in an odd number of backslashes, which carries the value to the next line.
+fn ends_in_backslash(line: &str) -> bool {
+    line.trim_end_matches(['\r', ' ', '\t']).bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
 }
 
 /// `quarry env-keys <file>`: the key names, one per line.
@@ -121,12 +154,13 @@ pub fn run_env_keys(file: &str) -> Result<(), String> {
     }
     let bytes = fs::read(file).map_err(|e| format!("quarry: can't read {}: {e}", clean_name(file)))?;
     let text = String::from_utf8_lossy(&bytes);
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     // A key file's lines are secret text that can look like `NAME=`, so it is not read at all. A
     // .env value holding a key starts after `NAME=`, never at the start of a line.
     if text.lines().any(|l| l.trim_start().starts_with("-----BEGIN")) || text.contains('\0') {
         return Err(format!("quarry: {} is a key file, not an env file", clean_name(file)));
     }
-    let keys = env_keys(&text);
+    let keys = env_keys(text);
     crate::emit(&keys.iter().map(|k| format!("{k}\n")).collect::<String>());
     Ok(())
 }
@@ -180,8 +214,8 @@ mod tests {
 
     #[test]
     fn env_keys_prints_names_only() {
-        let text = "# comment\nA=1\nexport B = \"two words\"\n\nA=again\nC.D-E=x\n=bad\n1BAD=x\nnot a pair\nE=\n";
-        assert_eq!(env_keys(text), ["A", "B", "C.D-E", "E"]);
+        let text = "# comment\nA=1\nexport B = \"two words\"\n\nA=again\nC.D_E=x\nD-E=x\n=bad\n1BAD=x\nnot a pair\nE=\n";
+        assert_eq!(env_keys(text), ["A", "B", "C.D_E", "E"]);
     }
 
     #[test]
@@ -201,6 +235,19 @@ mod tests {
         assert_eq!(env_keys(&format!("Q=\"-----BEGIN {k}\nAb3xQ==\n-----END {k}\"\nB=2\n")), ["Q", "B"]);
         assert_eq!(env_keys(&format!("Q=\"-----BEGIN {k}\nAb3xQ==\n-----END {k}\nx=\"\nB=2\n")), ["Q", "B"]);
         assert_eq!(env_keys(&format!("not a key: -----BEGIN {k}\nAb3xQ==\n-----END {k}\nB=2\n")), ["B"]);
+    }
+
+    #[test]
+    fn base64_and_continued_lines_are_not_keys() {
+        let text = "A=1\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC==\nc2VjcmV0cGFzc3dvcmQ=\ndGVzdA==\nB=one \\\ncontinuedSECRETpart=more \\\nalsoSecret=x\nC=2\nD=ends in escaped \\\\\nE=3\n";
+        assert_eq!(env_keys(text), ["A", "B", "C", "D", "E"]);
+        // A quote opened after a name this does not print still hides the lines inside it.
+        assert_eq!(env_keys("my-key=\"first\nsecretPart=x\n\"\nF=1\n"), ["F"]);
+    }
+
+    #[test]
+    fn a_bom_and_crlf_lines_are_read() {
+        assert_eq!(env_keys("\u{feff}FIRST=1\r\nSECOND=\"a\r\nb\"\r\nTHIRD=3\r\n"), ["FIRST", "SECOND", "THIRD"]);
     }
 
     #[test]
