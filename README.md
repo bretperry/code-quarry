@@ -61,7 +61,7 @@ quarry grep [flags] <pattern> [path...]
   exit 0 match · 1 no match · 2 error
 ```
 
-- **No index needed.** It reads the live files, so it is never stale. In a git repo it searches tracked and unignored files; `--no-ignore` searches every file under the target, and a file named on the command line is searched even if git ignores it. Outside git it walks the folder and skips folders that start with a dot. `.git` is never searched.
+- **No index needed.** It reads the live files, so it is never stale. In a git repo it searches tracked and unignored files; `--no-ignore` searches every file under the target, and a file named on the command line is searched even if git ignores it or it sits in a dot folder. Sensitive-file rules still apply to it. Outside git it walks the folder and skips folders that start with a dot. `.git` is never searched.
 - **Matching runs on redacted text only.** Every file goes through the same reader `search` uses: sensitive paths, symlinks, and binary files are not read, and a file whose redaction fails is withheld. Files over 500 KB or not in UTF-8 are skipped, and stderr names them. There is no match on raw text first, so `-l`, `-c`, and the exit code tell nothing about a secret. Like ripgrep, `-c` lists only files with a match.
 - **Patterns are Rust regex syntax.** It runs in linear time. Lookaround and backreferences are errors (exit 2), and `-P` is refused. Use `-F` for plain text. A pattern matches within one line.
 - **Redaction can hide a match.** A line with a token, a hash, or a `password = ...` value shows `[REDACTED]` in its place, so grepping for the hidden part finds nothing. stderr counts the files that had redactions. The count does not depend on your pattern.
@@ -92,7 +92,7 @@ No hooks or MCP server needed: any agent that can run a shell command can use qu
 - **`quarry grep` can't read a secret back.** It matches only on redacted text, so grepping for a secret's value finds nothing, in any mode.
 - **Redaction runs twice.** Once before indexing, and again on the live file at every search, so an old index can't leak and a secret added after indexing is still caught.
 - **It fails closed.** If redaction panics or won't settle, that file is withheld. Non-UTF-8 files, files with NUL bytes, symlinks, paths leading out of the repo, and files over 500 KB are never read. An index from another version or a different redactor is refused.
-- **Sensitive files are skipped by path**, at index and at search: `.env*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.tfvars`, `*.tfstate`, `id_rsa`, `.npmrc`, `.netrc`, `.ssh/`, `.aws/`, `secrets/`, `keys/`, `private/`, `vault/`, and any filename containing `secret`, `credential`, `password`, `apikey`, or `service-account`. A real code file with such a name, like `secrets_manager.py`, isn't searchable.
+- **Sensitive files are skipped by path**, at index and at search: `.env*`, `*.env`, `*.env.*`, `env`, `env.*` (but not code like `env.ts`), `*-env`, `.dev.vars`, `*.pem`, `*.key`, `*.p12`, `*.tfvars`, `*.tfvars.json`, `*.tfstate`, `id_rsa` and names containing it, `.npmrc`, `.netrc`, `.my.cnf`, `.s3cfg`, `.boto`, `.vault-token`, `kubeconfig`, `.ssh/`, `.aws/`, `secrets/`, `keys/`, `private/`, `vault/`, and any filename containing `secret`, `credential`, `password`, `apikey`, or `service-account`. A backup of any of these (`.bak`, `.old`, `.orig`, `.save`, `.swp`, `~`) is skipped too, while `.env` templates (`.example`, `.sample`, `.template`) are read. Files under `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.azure`, `.gcloud`, `.config/gcloud`, or `.secrets` are skipped wherever the search starts, even when it starts inside one. A real code file with a sensitive name, like `secrets_manager.py`, isn't searchable.
 
 <details>
 <summary><b>What it detects</b></summary>
@@ -109,15 +109,23 @@ quarry protects what passes through quarry. An agent that skips quarry and opens
 - **Detection reads shapes, not meaning.** A secret that looks like ordinary code can pass. The cases are listed below.
 
 <details>
-<summary><b>What slips past detection</b></summary>
+<summary><b>Known gaps: what quarry does not redact</b></summary>
 
 - A short, ordinary string under an ordinary name: `x = "hunter2"`.
-- An unquoted word with no digit: `password = hunter`, which reads as a variable.
+- A key name outside the secret-name list: `mfa_seed`, `webhook_url`, `connstr`, and config words like Redis's `requirepass` and `masterauth`.
+- An unquoted single word with no digit after `=`: `password = hunter`, which reads as a variable. (`password: hunter` at the start of a YAML line is redacted.)
+- In a YAML-looking line, a capitalized word with no digit (`password: Summer`), which reads as a type like `SecretStr`.
 - A secret split across strings, encoded, or obfuscated.
 - A secret in prose: `// the password is hunter2`.
 - Short or low-entropy keys of a format it doesn't know.
-- A value on a later line of a multi-line call, or a short flag like `-p hunter2`.
-- An unquoted value with `.` or `<` in it (`password: gecko.x`), a tuple (`let (user, pw) = ("bob", "x")`), or a non-random secret in a URL path.
+- A value on a later line of a multi-line call or a typed assignment (`const TOKEN: &str =` with `"x";` on the next line), or a short flag like `-p hunter2`. An untyped `password =` with the quoted value on the next line is caught.
+- Multi-line dict and map literals in code (`creds = {\n  "pw": "x"\n}`); objects are followed only under a quoted JSON key.
+- An unquoted value with `.` or `<` in it after `=` (`password = gecko.x`), a tuple (`let (user, pw) = ("bob", "x")`), or a non-random secret in a URL path.
+- Ruby `%q(...)` strings and heredoc values.
+- Fullwidth punctuation as the operator: `password＝x`, `password：x`.
+- Generic folder names (`secrets/`, `private/`, `keys/`, `vault/`, `credentials/`) are skipped inside a repo, but not when the search itself starts inside one, since whole projects live under such names.
+- A hardlink to a sensitive file under an ordinary name.
+- Files with NUL bytes, and UTF-16 without a byte-order mark or mostly non-ASCII text, are skipped without a note; `quarry grep` names only files over 500 KB or not UTF-8 that it can recognize.
 
 </details>
 
