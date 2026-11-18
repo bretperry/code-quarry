@@ -116,7 +116,7 @@ pub fn read_clean(repo: &Path, rel: &str) -> Result<Source, Refused> {
         return Err(Refused::Unreadable);
     }
     // The repo itself may sit in `~/.aws` or `~/.ssh`, so the folders are checked on the real path.
-    if real.components().any(|c| crate::sensitive::DIRS.iter().any(|d| c.as_os_str().eq_ignore_ascii_case(d))) {
+    if in_secret_folder(&real) {
         return Err(Refused::Sensitive);
     }
     if meta.len() > MAX_FILE_BYTES {
@@ -130,6 +130,16 @@ pub fn read_clean(repo: &Path, rel: &str) -> Result<Source, Refused> {
     let raw = String::from_utf8(bytes).map_err(|_| Refused::NotText)?;
     let clean = redact::clean(&raw).ok_or(Refused::Withheld)?;
     Ok(Source { raw, clean })
+}
+
+/// Folders that hold credentials wherever they sit, checked on a file's canonical path. Generic
+/// names like `secrets/` are left to the repo-relative rule: on an absolute path they would refuse
+/// whole projects.
+const SECRET_FOLDERS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud", ".secrets"];
+
+fn in_secret_folder(real: &Path) -> bool {
+    let parts: Vec<String> = real.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect();
+    parts.iter().any(|p| SECRET_FOLDERS.contains(&p.as_str())) || parts.windows(2).any(|w| w[0] == ".config" && w[1] == "gcloud")
 }
 
 #[derive(Debug, PartialEq)]

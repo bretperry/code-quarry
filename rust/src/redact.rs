@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 type Spans = Vec<Range<usize>>;
 
@@ -117,7 +117,19 @@ const CODE_WORDS: &[&str] = &["none", "null", "nil", "undefined", "true", "false
 const SENSITIVE_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".kube", ".azure", ".gcloud", ".docker", "gcloud", ".env", "secret", "secrets", ".secrets", "credentials", "keys", "private", "vault"];
 const SENSITIVE_NAMES: &[&str] = &[
     ".envrc", ".netrc", "_netrc", ".npmrc", ".pypirc", ".pgpass", ".htpasswd", ".git-credentials", ".dockercfg",
-    "auth.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "wp-config.php",
+    "auth.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "wp-config.php", "env", "dotenv", ".vault-token",
+    "kubeconfig", ".my.cnf", ".s3cfg", ".boto",
+];
+/// SSH private key names, also inside a longer name (`my_id_rsa`).
+const SSH_KEY_NAMES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+/// Endings of an editor or hand-made backup, checked against the name without them.
+const BACKUP_SUFFIXES: &[&str] = &[".bak", ".old", ".orig", ".save", ".swp", "~"];
+/// Source and doc extensions: `env.ts` or `env.d.ts` is code, while `env.local` or `env.json`
+/// holds values.
+const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "kts", "rb", "php", "cs", "swift",
+    "c", "h", "cc", "cpp", "hpp", "scala", "sh", "bash", "zsh", "fish", "ps1", "md", "rst", "txt", "html", "vue",
+    "svelte", "dart", "ex", "exs", "lua", "pl", "r", "jl", "nix", "zig",
 ];
 const SENSITIVE_EXTENSIONS: &[&str] =
     &["env", "pem", "key", "p12", "pfx", "jks", "keystore", "ppk", "asc", "gpg", "kdbx", "tfvars", "tfstate"];
@@ -143,10 +155,33 @@ pub fn is_sensitive_path(rel: &str) -> bool {
     if parts.iter().any(|p| SENSITIVE_DIRS.contains(p) || *p == "..") {
         return true;
     }
+    // `id_rsa.bak`, `.npmrc.old`, `.env.swp` (vim's `.name.swp`), `config.yml~`.
+    let mut base = name;
+    while let Some(stripped) = BACKUP_SUFFIXES.iter().find_map(|s| base.strip_suffix(s)).filter(|b| !b.is_empty()) {
+        if is_sensitive_name_of_file(stripped) || stripped.strip_prefix('.').is_some_and(is_sensitive_name_of_file) {
+            return true;
+        }
+        base = stripped;
+    }
+    is_sensitive_name_of_file(name)
+}
+
+/// The file-name half of `is_sensitive_path`, lowercase.
+fn is_sensitive_name_of_file(name: &str) -> bool {
     if is_env_file_name(name) {
         return !ENV_TEMPLATE_SUFFIXES.iter().any(|s| name.ends_with(s));
     }
+    // `env.local`, `env.json`, `prod-env`, but not the code file `env.ts`.
+    if let Some(ext) = name.strip_prefix("env.") {
+        let last = ext.rsplit('.').next().unwrap_or(ext);
+        if !CODE_EXTENSIONS.contains(&last) && !ENV_TEMPLATE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+            return true;
+        }
+    }
     SENSITIVE_NAMES.contains(&name)
+        || name.ends_with("-env")
+        || name.ends_with(".tfvars.json")
+        || (SSH_KEY_NAMES.iter().any(|k| name.contains(k)) && !name.ends_with(".pub"))
         || name.rsplit_once('.').is_some_and(|(_, ext)| SENSITIVE_EXTENSIONS.contains(&ext))
         || SENSITIVE_NAME_PARTS.iter().any(|p| name.contains(p))
 }
@@ -200,6 +235,9 @@ fn find_all(text: &str) -> Spans {
     symbol_strings(text, &mut spans);
     tokens_and_high_entropy(text, &mut spans);
     assignments(text, &mut spans);
+    xml_pairs(text, &mut spans);
+    toml_secret_tables(text, &mut spans);
+    k8s_secret_data(text, &mut spans);
     spans.retain(|s| !text[s.clone()].chars().all(|c| MARK.contains(c) || c.is_whitespace()));
     spans
 }
@@ -523,6 +561,16 @@ pub fn is_sensitive_name(name: &str) -> bool {
         || words.windows(2).any(|p| SENSITIVE_PAIRS.contains(&(p[0].as_str(), p[1].as_str())))
 }
 
+/// A name whose last word is the secret one (`secrets`, `db_password`, `api_key`, `tokens`), so
+/// everything under it is a secret. `token_pattern` or `PUNCTUATION_TOKENS_LIST` only mention one.
+fn names_a_secret(name: &str) -> bool {
+    let words = name_words(name);
+    let Some(last) = words.last() else { return false };
+    SENSITIVE_WORDS.contains(&last.as_str())
+        || SENSITIVE_FRAGMENTS.iter().any(|f| last.contains(f))
+        || words.windows(2).last().is_some_and(|p| SENSITIVE_PAIRS.contains(&(p[0].as_str(), p[1].as_str())))
+}
+
 fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
 }
@@ -734,10 +782,25 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     }
     let line_start = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
     let before = text[line_start..start].trim_start();
-    let at_line_start = before.is_empty() || before == "export ";
-    // `<password>x</password>`
-    if start > 0 && bytes[start - 1] == b'<' {
-        spans.extend(xml_element_value(bytes, name_end));
+    // Dockerfile `ENV` and `ARG` set variables like a shell's `export`.
+    let docker = matches!(before, "ENV " | "ARG ");
+    let at_line_start = before.is_empty() || before == "export " || docker;
+    // `<password>x</password>`, closed on the same line. A `<` before the name is more often a
+    // generic or JSX (`Option<Token>`, `<PasswordInput />`), which fall through to the rules below.
+    if start > 0
+        && bytes[start - 1] == b'<'
+        && let Some(r) = xml_element_value(text, start, name_end)
+    {
+        spans.push(r);
+        return;
+    }
+    // `ENV DB_PASSWORD value`: the rest of the line.
+    if docker && is_env_name(name) && matches!(bytes.get(name_end), Some(b' ' | b'\t')) {
+        let v = skip_inline_space(bytes, name_end);
+        let end = trimmed_line_end(bytes, v);
+        if end > v && !matches!(bytes[v], b'=' | b'$') {
+            spans.push(v..end);
+        }
         return;
     }
     // A YAML key: the name opens its line, past any indent, list dashes, or a quote.
@@ -753,6 +816,38 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
         i += 1;
     }
     let after_name = skip_inline_space(bytes, i);
+
+    // Inside a string (`echo "db_password: x" >> f`, `-H "X-Api-Key: x"`), the value runs to the
+    // string's closing quote. Without this, that quote reads as the start of a literal and the
+    // value before it stays.
+    if let Some(q) = open_quote(bytes, line_start, start)
+        && bytes.get(name_end) != Some(&q)
+        && !bytes[after_name..].starts_with(b"::")
+        && let Some(after_op) = skip_operator(bytes, after_name)
+    {
+        let v = skip_inline_space(bytes, after_op);
+        match bytes.get(v) {
+            // A nested literal, or a placeholder (`"token={token}"`, `"password=%s"`, `"key=$KEY"`):
+            // the rules below decide.
+            Some(b'"' | b'\'' | b'`' | b'{' | b'$' | b'%' | b'\n') | None => {}
+            Some(_) => {
+                let end = closing_quote(bytes, v, q);
+                let end = v + text[v..end].trim_end().len();
+                let value = &text[v..end];
+                // Code in a string (`"tokens : & mut TokenStream"`, `` `token: ${x}` ``) or a
+                // plain word like `true` is left to the rules below.
+                // Already cleaned on an earlier pass, a plain word, or a count (`max_tokens = 100`).
+                let count = value.bytes().all(|b| b.is_ascii_digit()) && name_words(name).iter().any(|w| w == "tokens" || w == "token");
+                if value.starts_with(MARK) || is_plain_word(value) || count {
+                    return;
+                }
+                if end > v && !is_code_value(value) {
+                    spans.push(v..end);
+                    return;
+                }
+            }
+        }
+    }
 
     // A quoted name marks the line: `option("--password", default="x")`, `json:"pw" default:"x"`.
     if name_was_quoted && literals_to_line_end(bytes, after_name, spans) > 0 {
@@ -791,11 +886,22 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
             }
         }
     };
-    // `secret = [\n "x",\n]`, `"tokens": ["x", "y"]`: every literal in the array.
+    // `secret = [\n "x",\n]`, `"secret": {\n "a": "x"\n}`: every literal value inside.
     let v = skip_inline_space(bytes, after_op);
     // One that closes on its own line is left to the line rules below (`[]byte("x")`).
-    if bytes.get(v) == Some(&b'[') && !bytes[v..line_end(bytes, v)].contains(&b']') {
-        array_literals(bytes, v, spans);
+    // An object only under a quoted (JSON) name: `secret = {` or `ScmCreds => {` opens code.
+    if let Some(&open @ (b'[' | b'{')) = bytes.get(v)
+        // The quotes must hold just the name: `"node_modules/cookie": {` names a package.
+        && names_a_secret(name)
+        // `token` names grammar rules and NLP data far more often than a map of secrets.
+        && (open == b'['
+            || (name_was_quoted
+                && start > 0
+                && bytes[start - 1] == bytes[name_end]
+                && !name_words(name).last().is_some_and(|w| w == "token" || w == "tokens")))
+        && !bytes[v..line_end(bytes, v)].contains(&if open == b'[' { b']' } else { b'}' })
+    {
+        bracket_literals(bytes, v, spans);
         return;
     }
     // A quoted value may sit on the next line: `password =\n    "x"`.
@@ -805,19 +911,38 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     if literals_to_line_end(bytes, if at_quote { next_token } else { after_op }, spans) > 0 {
         return;
     }
-    if yaml_key && op_byte == b':' && after_op == after_name + 1 && yaml_value(text, line_start, v, spans) {
+    // `Authorization: Token x`, any scheme: the rest of the line.
+    if op_byte == b':' && (name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("proxy-authorization")) {
+        let end = trimmed_line_end(bytes, v);
+        if end > v && !is_code_value(&text[v..end]) {
+            spans.push(v..end);
+        }
+        return;
+    }
+    if yaml_key && op_byte == b':' && after_op == after_name + 1 && yaml_value(text, line_start, v, names_a_secret(name), spans) {
         return;
     }
     let end = bare_end(bytes, v);
     let value = &text[v..end];
     let tight = after_name == name_end && v == after_op;
 
-    // `.env` shape: `PASSWORD=anything` at the start of a line, no spaces around the `=`.
+    // `.env` shape: `PASSWORD=anything` at the start of a line, no spaces around the `=`. The value
+    // runs to the end of the line: `DB_PASSWORD=a b c`.
     if at_line_start && !name_was_quoted && is_env_name(name) && tight && op_byte == b'=' {
-        if !value.is_empty() && !value.starts_with('$') {
+        let end = trimmed_line_end(bytes, v);
+        if end > v && !value.starts_with('$') {
             spans.push(v..end);
         }
         return;
+    }
+    // `password = correct horse battery` at the start of a line: several words that aren't code.
+    if yaml_key && op_byte == b'=' && after_op == after_name + 1 {
+        let end = trimmed_line_end(bytes, v);
+        let rest = &text[v..end];
+        if rest.contains([' ', '\t']) && !is_code_value(rest) {
+            spans.push(v..end);
+            return;
+        }
     }
     // `key: type = value`, in Rust, TypeScript, Python.
     if op_byte == b':' {
@@ -839,26 +964,69 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     }
 }
 
-/// The text of `<name ...>text</name>`, from past the open tag's `>` to the next `<`.
-fn xml_element_value(bytes: &[u8], name_end: usize) -> Option<Range<usize>> {
-    let line = line_end(bytes, name_end);
-    let gt = bytes[name_end..line].iter().position(|b| *b == b'>').map(|p| name_end + p)?;
-    if gt > name_end && bytes[gt - 1] == b'/' {
-        return None;
-    }
-    let v = gt + 1;
-    let end = bytes[v..].iter().position(|b| *b == b'<').map_or(bytes.len(), |p| v + p);
-    (end > v).then_some(v..end)
+/// The last non-space position of the line holding `from`, at or after `from`.
+fn trimmed_line_end(bytes: &[u8], from: usize) -> usize {
+    let end = line_end(bytes, from);
+    from + bytes[from..end].iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |p| p + 1)
 }
 
-/// Every quoted literal in the array opening at `open`, up to its matching `]`, across lines.
-fn array_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
+/// The quote still open at `at`, scanning from `line_start`, if `at` is inside a string.
+fn open_quote(bytes: &[u8], line_start: usize, at: usize) -> Option<u8> {
+    let mut open = None;
+    let mut i = line_start;
+    while i < at {
+        match (bytes[i], open) {
+            (b'\\', Some(_)) => i += 1,
+            (q @ (b'"' | b'\'' | b'`'), None) => open = Some(q),
+            (q, Some(o)) if q == o => open = None,
+            _ => {}
+        }
+        i += 1;
+    }
+    open
+}
+
+/// The position of the unescaped `quote` that closes the string around `from`, or a `;` before it
+/// (`"Password=x;User Id=bob"`), or the line's end.
+fn closing_quote(bytes: &[u8], from: usize, quote: u8) -> usize {
+    let end = line_end(bytes, from);
+    let mut i = from;
+    while i < end {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b if b == quote || b == b';' => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    end
+}
+
+/// The text of `<name ...>text</name>`, when the element closes on the same line.
+fn xml_element_value(text: &str, start: usize, name_end: usize) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    let line = line_end(bytes, name_end);
+    if !matches!(bytes.get(name_end), Some(b'>' | b' ' | b'\t')) {
+        return None;
+    }
+    let gt = bytes[name_end..line].iter().position(|b| *b == b'>').map(|p| name_end + p)?;
+    if bytes[gt - 1] == b'/' {
+        return None;
+    }
+    let close = format!("</{}>", &text[start..name_end]);
+    let end = text[gt + 1..line].find(&close).map(|p| gt + 1 + p)?;
+    (end > gt + 1).then_some(gt + 1..end)
+}
+
+/// Every quoted literal value in the array or object opening at `open`, up to its matching close,
+/// across lines. An object's keys (`"a":`) stay.
+fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
     let mut depth = 0usize;
     let mut i = open;
     while i < bytes.len() {
         match bytes[i] {
-            b'[' => depth += 1,
-            b']' => {
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
                 depth -= 1;
                 if depth == 0 {
                     return;
@@ -867,7 +1035,9 @@ fn array_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
             b'"' | b'\'' | b'`' => {
                 if let Some(r) = quoted_value(bytes, i) {
                     i = r.end.max(i + 1);
-                    if r.len() > 2 {
+                    let after = skip_inline_space(bytes, i);
+                    let is_key = bytes.get(after) == Some(&b':') && bytes.get(after + 1) != Some(&b':');
+                    if r.len() > 2 && !is_key {
                         spans.push(r);
                     }
                     continue;
@@ -879,66 +1049,278 @@ fn array_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
     }
 }
 
-/// Words a YAML-looking `name: value` line can end in that are a type or code, not a value:
-/// `password: str` in a Python class, `token: string` in TypeScript.
+/// Words a `name: value` line can end in that are a type or code, not a value: `password: str` in
+/// a Python class, `token: string` in TypeScript.
 const TYPE_WORDS: &[&str] = &[
     "str", "string", "bool", "boolean", "int", "integer", "float", "number", "bytes", "any", "unknown", "object", "dict",
-    "list", "none", "null", "nil", "undefined", "true", "false", "~",
+    "list", "tuple", "set", "none", "null", "nil", "undefined", "true", "false", "~",
 ];
 
-/// A YAML value after `name:` at the start of a line: the rest of the line, or for a block scalar
-/// (`|`, `>`) or a list, the more-indented lines below. Code that looks the same (`token: string`,
-/// `password: String,`, `key: str = "x"`) is left to the other rules. True when it took the line.
-fn yaml_value(text: &str, line_start: usize, v: usize, spans: &mut Spans) -> bool {
+/// A type annotation: `str`, `SecretStr`, `Option<String>`, `Optional[str]`, `str | None`,
+/// `dict[str, Any]`.
+fn looks_like_type(value: &str) -> bool {
+    value.split('|').all(|part| {
+        let part = part.trim();
+        let base_end = part.find(['[', '<']).unwrap_or(part.len());
+        let (base, args) = part.split_at(base_end);
+        let base_ok = TYPE_WORDS.contains(&base.to_ascii_lowercase().as_str())
+            // `SecretStr`, `Option`: capitalized with lower case after. `LEAK` is a value.
+            || (base.starts_with(|c: char| c.is_ascii_uppercase())
+                && base.bytes().any(|b| b.is_ascii_lowercase())
+                && base.bytes().all(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'.')));
+        base_ok && args.bytes().all(|b| b.is_ascii_alphabetic() || matches!(b, b'[' | b']' | b'<' | b'>' | b',' | b' ' | b'_' | b'.' | b'|'))
+    })
+}
+
+/// Words that make an unquoted value read as code: `token = token or default`.
+const CODE_KEYWORDS: &[&str] = &["if", "else", "or", "and", "not", "in", "is", "for", "await", "new", "return", "as", "then"];
+
+/// An unquoted value that is code or a type, not a secret: `getPassword(),`, `str | None`,
+/// `${DB_PASSWORD}`, `a if b else c`.
+fn is_code_value(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    value.ends_with([',', ';', '{', '(', '[', '\\'])
+        || value.starts_with(['$', '{', '[', '(', '*', '!', '%', '<', '@', '&'])
+        || value.contains(['(', ')', '{', '`'])
+        || [" = ", "=>", "->", "::", "&&", "||", " + ", " ? "].iter().any(|op| value.contains(op))
+        || lower.split_whitespace().any(|w| CODE_KEYWORDS.contains(&w))
+        || looks_like_type(value)
+}
+
+/// Where a YAML `key: value` or `- item` line's value starts, past `key:` and any `&anchor`.
+fn yaml_mapping_value(line: &str) -> Option<usize> {
+    let (key_end, value) = match line.find(": ") {
+        Some(c) => (c, c + 2),
+        None if line.ends_with(':') => (line.len() - 1, line.len()),
+        None => return None,
+    };
+    let key = &line[..key_end];
+    let quoted = key.starts_with(['"', '\'']);
+    (!key.is_empty() && !key.starts_with('#') && (quoted || !key.contains([' ', '\t']))).then_some(value)
+}
+
+/// The more-indented lines under a YAML key at `indent`, from `at`. A block scalar (`|`, `>`) is
+/// hidden whole; otherwise each child's value is: `- item`, `key: value`, or a plain line. Comment
+/// and blank lines don't end the block. True when it took any line.
+fn yaml_block(text: &str, mut at: usize, indent: usize, scalar: bool, spans: &mut Spans) -> bool {
+    let bytes = text.as_bytes();
+    let mut took = false;
+    // A list may sit at the key's own indent: `passwords:\n- a`.
+    let mut list_at_indent = false;
+    while at < bytes.len() {
+        let stop = line_end(bytes, at);
+        let line = &text[at..stop];
+        let content = line.trim();
+        let pad = line.len() - line.trim_start().len();
+        let next = stop + 1;
+        if content.is_empty() || (!scalar && content.starts_with('#')) {
+            at = next;
+            continue;
+        }
+        let dash = content.starts_with("- ") || content == "-";
+        if pad < indent || (pad == indent && !(dash && !scalar && (!took || list_at_indent))) {
+            break;
+        }
+        list_at_indent |= pad == indent;
+        let body = at + pad;
+        let end = at + line.trim_end().len();
+        let value = if scalar {
+            body
+        } else if dash {
+            let item = skip_inline_space(bytes, body + 1).min(end);
+            skip_inline_space(bytes, item + yaml_mapping_value(&text[item..end]).unwrap_or(0))
+        } else {
+            skip_inline_space(bytes, body + yaml_mapping_value(&text[body..end]).unwrap_or(0))
+        };
+        if value < end {
+            spans.push(value..end);
+        }
+        took = true;
+        at = next;
+    }
+    took
+}
+
+/// A YAML value after `name:` at the start of a line: the rest of the line, a flow list or map, or
+/// the more-indented lines below (when `whole`: the name is the secret, see `names_a_secret`). Code that looks the same (`token: string`, `password: String,`,
+/// `key: str = "x"`) is left to the other rules. True when it took the value.
+fn yaml_value(text: &str, line_start: usize, v: usize, whole: bool, spans: &mut Spans) -> bool {
     let bytes = text.as_bytes();
     let end = line_end(bytes, v);
-    let value = text[v..end].trim_end();
     let indent = bytes[line_start..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
-    // Past a trailing comment: `password: |  # from vault`.
-    let head = if value.starts_with('#') { "" } else { value.split(" #").next().unwrap_or("").trim_end() };
-    let list_only = head.is_empty();
-    if list_only || matches!(head, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
-        let mut at = (end + 1).min(bytes.len());
-        let mut took = false;
-        while at < bytes.len() {
-            let stop = line_end(bytes, at);
-            let line = &text[at..stop];
-            let pad = line.bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
-            if !line.trim().is_empty() && pad <= indent && !(list_only && pad == indent && line[pad..].starts_with("- ")) {
-                break;
-            }
-            let body = at + pad;
-            if list_only {
-                // Only list items: `- x` lines under the key. A nested mapping is not a value.
-                if !line.trim().is_empty() {
-                    if !line[pad..].starts_with('-') {
-                        break;
-                    }
-                    let item = skip_inline_space(bytes, body + 1);
-                    if item < stop {
-                        spans.push(item..stop);
-                    }
-                }
-            } else if body < stop {
-                spans.push(body..stop);
-            }
-            took = true;
-            at = stop + 1;
-        }
-        return took || !list_only;
+    let mut v = v;
+    let mut value = text[v..end].trim_end();
+    // `password: &anchor value`: the anchor names the value, it isn't one.
+    if let Some(anchor) = value.strip_prefix('&') {
+        let skip = 1 + anchor.find([' ', '\t']).unwrap_or(anchor.len());
+        v = skip_inline_space(bytes, v + skip);
+        value = text[v..end].trim_end();
     }
-    let lower = value.to_ascii_lowercase();
-    let code = value.ends_with([',', ';', '{', '(', '[']) || value.starts_with(['$', '{', '[', '(', '&'])
-        || value.contains(" = ") || value.contains("=>") || value.contains("->") || value.contains("::")
-        || TYPE_WORDS.contains(&lower.as_str())
-        // A capitalized type with no digits: `SecretStr`, `Option<String>`, `Optional[str]`.
-        || (value.starts_with(|c: char| c.is_ascii_uppercase())
-            && value.bytes().all(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'<' | b'>' | b'[' | b']' | b'.')));
-    if code || value.starts_with(['"', '\'']) {
+    // Past a trailing comment: `password: |  # from vault`, `withCredentials: false, // default`.
+    let head = if value.starts_with('#') { "" } else { value.split(" #").next().unwrap_or("").trim_end() };
+    let head = head.split(" //").next().unwrap_or("").trim_end();
+    // The lines below belong to the value only under a name that is the secret (`secrets:`), or
+    // for a block scalar (`|`).
+    let scalar = matches!(head, "|" | "|-" | "|+" | ">" | ">-" | ">+");
+    if head.is_empty() && !whole {
+        return false;
+    }
+    if head.is_empty() || scalar {
+        let took = yaml_block(text, (end + 1).min(bytes.len()), indent, !head.is_empty(), spans);
+        return took || !head.is_empty();
+    }
+    // `passwords: [a, b]`, `secret: {a: b}`: everything inside.
+    if (head.starts_with('[') && head.ends_with(']')) || (head.starts_with('{') && head.ends_with('}')) {
+        if head.len() > 2 {
+            spans.push(v + 1..v + head.len() - 1);
+        }
+        return true;
+    }
+    if value.starts_with(['"', '\'']) || is_code_value(head) || is_plain_word(head) {
         return false;
     }
     spans.push(v..v + value.len());
     true
+}
+
+/// Setting words that are never a secret: `id-token: write`, `withCredentials: true`.
+const PLAIN_WORDS: &[&str] = &[
+    "read", "write", "none", "true", "false", "yes", "no", "on", "off", "null", "required", "optional", "enabled",
+    "disabled", "auto",
+];
+
+fn is_plain_word(value: &str) -> bool {
+    PLAIN_WORDS.contains(&value.to_ascii_lowercase().as_str())
+}
+
+/// Hadoop-style and .NET-style settings, where the name and the value are separate elements or
+/// attributes: `<name>db.password</name><value>x</value>`, `<entry key="password">x</entry>`,
+/// `<add key="ApiKey" value="x"/>`, `<setting name="ApiKey"><value>x</value>`.
+fn xml_pairs(text: &str, spans: &mut Spans) {
+    use std::sync::OnceLock;
+    static NAME: OnceLock<regex::Regex> = OnceLock::new();
+    static ATTR: OnceLock<regex::Regex> = OnceLock::new();
+    static VALUE: OnceLock<regex::Regex> = OnceLock::new();
+    static VALUE_ATTR: OnceLock<regex::Regex> = OnceLock::new();
+    if !text.contains('<') {
+        return;
+    }
+    let name = NAME.get_or_init(|| regex::Regex::new(r"<name>\s*([^<]{1,200}?)\s*</name>").unwrap());
+    let attr = ATTR.get_or_init(|| {
+        regex::Regex::new(r#"<[A-Za-z][\w:.-]*\s[^<>]*?\b(?:key|name)\s*=\s*["']([^"'<>]{1,200})["'][^<>]*>"#).unwrap()
+    });
+    let value = VALUE.get_or_init(|| regex::Regex::new(r"^\s*<value>([^<]*)</value>").unwrap());
+    let value_attr = VALUE_ATTR.get_or_init(|| regex::Regex::new(r#"\bvalue\s*=\s*["']([^"']*)["']"#).unwrap());
+    let next_value = |from: usize, spans: &mut Spans| {
+        if let Some(c) = value.captures(&text[from..]).and_then(|c| c.get(1)).filter(|m| !m.as_str().trim().is_empty()) {
+            spans.push(from + c.start()..from + c.end());
+        }
+    };
+    for c in name.captures_iter(text) {
+        let (whole, n) = (c.get(0).unwrap(), c.get(1).unwrap());
+        if is_sensitive_name(n.as_str()) {
+            next_value(whole.end(), spans);
+        }
+    }
+    for c in attr.captures_iter(text) {
+        let (tag, n) = (c.get(0).unwrap(), c.get(1).unwrap());
+        if !is_sensitive_name(n.as_str()) {
+            continue;
+        }
+        if let Some(v) = value_attr.captures(tag.as_str()).and_then(|v| v.get(1)).filter(|v| !v.as_str().is_empty()) {
+            spans.push(tag.start() + v.start()..tag.start() + v.end());
+            continue;
+        }
+        if tag.as_str().ends_with("/>") {
+            continue;
+        }
+        // The element's own text, or a `<value>` child.
+        let after = tag.end();
+        let lt = text[after..].find('<').map_or(text.len(), |p| after + p);
+        let own = &text[after..lt];
+        if !own.trim().is_empty() {
+            let lead = own.len() - own.trim_start().len();
+            spans.push(after + lead..after + own.trim_end().len());
+        } else {
+            next_value(after, spans);
+        }
+    }
+}
+
+/// Every value in a TOML or INI table whose name is secret: `[secrets]`, `[database.password]`.
+fn toml_secret_tables(text: &str, spans: &mut Spans) {
+    let bytes = text.as_bytes();
+    let mut secret = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        let stop = line_end(bytes, at);
+        let line = text[at..stop].trim();
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.split('#').next().unwrap_or("").trim_end();
+            if let Some(name) = header.strip_suffix(']') {
+                let name = name.trim_start_matches('[').trim_end_matches(']');
+                if name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'"' | b' ')) && !name.is_empty() {
+                    // `[dependencies.pin-project-lite]` names a package, not a secret.
+                    secret = !name.contains("dependencies")
+                        && name.split('.').any(|part| names_a_secret(part.trim().trim_matches('"')));
+                    at = stop + 1;
+                    continue;
+                }
+            }
+        }
+        if secret
+            && !line.starts_with(['#', ';'])
+            && let Some(eq) = text[at..stop].find('=')
+        {
+            let v = skip_inline_space(bytes, at + eq + 1);
+            match bytes.get(v) {
+                Some(b'"' | b'\'') => spans.extend(quoted_value(bytes, v)),
+                Some(b'[' | b'{') => bracket_literals(bytes, v, spans),
+                _ => {
+                    let end = trimmed_line_end(bytes, v);
+                    if end > v {
+                        spans.push(v..end);
+                    }
+                }
+            }
+        }
+        at = stop + 1;
+    }
+}
+
+/// A Kubernetes `kind: Secret`: every value under `data:` and `stringData:`, whatever its key.
+fn k8s_secret_data(text: &str, spans: &mut Spans) {
+    if !text.contains("Secret") {
+        return;
+    }
+    let bytes = text.as_bytes();
+    // One YAML document at a time, split at `---` lines.
+    let mut doc_start = 0;
+    loop {
+        let doc_end = text[doc_start..].find("\n---").map_or(text.len(), |p| doc_start + p + 1);
+        let doc = &text[doc_start..doc_end];
+        let is_secret = doc.lines().any(|l| {
+            let l = l.trim_end();
+            l.strip_prefix("kind:").is_some_and(|k| k.trim().trim_matches(['"', '\'']) == "Secret")
+        });
+        if is_secret {
+            let mut at = doc_start;
+            while at < doc_end {
+                let stop = line_end(bytes, at);
+                let line = &text[at..stop];
+                let key = line.trim();
+                if matches!(key, "data:" | "stringData:") {
+                    let indent = line.len() - line.trim_start().len();
+                    yaml_block(text, (stop + 1).min(doc_end), indent, false, spans);
+                }
+                at = stop + 1;
+            }
+        }
+        if doc_end >= text.len() {
+            break;
+        }
+        doc_start = doc_end;
+    }
 }
 
 #[cfg(test)]
