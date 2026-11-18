@@ -567,8 +567,9 @@ pub fn is_sensitive_name(name: &str) -> bool {
 /// everything under it is a secret. `token_pattern` or `PUNCTUATION_TOKENS_LIST` only mention one.
 fn names_a_secret(name: &str) -> bool {
     let words = name_words(name);
-    // Helm's `existingSecret`, `existingPasswordSecretKey`: the name of a Kubernetes Secret.
-    if words.first().is_some_and(|w| w == "existing") {
+    // Helm's `existingSecret`, `existingPasswordSecretKey`, `imagePullSecrets`: names of
+    // Kubernetes Secrets, not their contents.
+    if words.first().is_some_and(|w| w == "existing") || words.iter().any(|w| w == "pull") {
         return false;
     }
     let Some(last) = words.last() else { return false };
@@ -1156,7 +1157,8 @@ const SCHEMA_KEYS: &[&str] = &[
     "name", "kind", "title", "example", "examples", "pattern", "minlength", "maxlength", "enum", "nullable",
     "readonly", "writeonly", "deprecated", "create", "mountpath", "path", "key", "optional", "items", "properties",
     "additionalproperties", "minimum", "maximum", "label", "placeholder", "help", "hint", "algorithm", "encoding",
-    "size", "rotationpolicy", "usages", "duration", "renewbefore",
+    "size", "rotationpolicy", "usages", "duration", "renewbefore", "apiversion", "metadata", "labels",
+    "annotations", "selector",
 ];
 
 fn is_schema_key(key: &str) -> bool {
@@ -1170,6 +1172,13 @@ fn is_schema_key(key: &str) -> bool {
 fn is_secret_candidate(value: &str, list_item: bool) -> bool {
     let value = value.split(" #").next().unwrap_or("").trim();
     let bare = value.trim_matches(['"', '\'']);
+    // A file name like `tls.crt` names where a secret is kept.
+    let file_name = bare.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && (2..=4).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_lowercase())
+    });
+    if file_name {
+        return false;
+    }
     // A lowercase slug like `osps-baseline` or `maturity-3` names something.
     let slug = bare.contains('-')
         && bare.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -1339,8 +1348,27 @@ fn yaml_value(text: &str, line_start: usize, v: usize, name: &str, spans: &mut S
     if value.starts_with(['"', '\'']) || is_code_value(head) || is_plain_word(head) || head.contains("{{") || !head.is_ascii() {
         return false;
     }
+    if is_label(name, head) {
+        return false;
+    }
     spans.push(v..v + head.len());
     true
+}
+
+/// A UI label or message, as in an i18n file: several words that end like a sentence (`Forgot
+/// password?`), interpolate (`%{count} keys`), or repeat the key (`new_api_key: New API key`).
+fn is_label(name: &str, value: &str) -> bool {
+    let value = value.trim_matches(['"', '\'']);
+    if !value.contains(' ') {
+        return false;
+    }
+    let key_words = name_words(name);
+    value.ends_with(['?', '.', '!', ':'])
+        || value.contains("%{")
+        || value
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .any(|w| key_words.iter().any(|k| k.eq_ignore_ascii_case(w)))
 }
 
 /// Setting words that are never a secret: `id-token: write`, `withCredentials: true`.

@@ -528,6 +528,11 @@ fn real_config_and_code_shapes_are_not_redacted() {
         "<FormField\n  control={form.control}\n  name=\"REFRESH_TOKEN_ROTATION_ENABLED\"\n  render={({ field }) => (\n    <FormItemLayout\n",
         // A list of error codes under auth, and a zod chain.
         "const C = {\n  auth: [\n    { code: 'session_not_found', description: 'User session not found' },\n  ],\n}\nconst schema = z.object({\n  password: z\n    .string()\n})\n",
+        // i18n labels under secret-named keys.
+        "en:\n  forgot_password: Forgot password?\n  new_api_key: New API key\n  count: \"%{count} tokens\"\n",
+        // Chart values naming Secrets and files, and a Secret's metadata.
+        "tlsSecret:\n  enabled: false\n  certItem: tls.crt\n  keyItem: tls.key\nglobal:\n  imagePullSecrets:\n  - pullSecret1\n",
+        "repo-credentials:\n  apiVersion: v1\n  metadata:\n    labels:\n      argocd.argoproj.io/secret-type: repository\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];
