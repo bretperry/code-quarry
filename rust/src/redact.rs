@@ -142,6 +142,9 @@ pub fn is_sensitive_path(rel: &str) -> bool {
 
 /// Cleans text, or returns None when it can't vouch for the result. Callers must withhold on None.
 pub fn clean(text: &str) -> Option<String> {
+    if test_failure(text) {
+        return None;
+    }
     guarded(|| {
         let mut out = apply(text, find_all(text));
         // Replacing can expose a new match; a few passes settle it, and if not, withhold.
@@ -154,6 +157,23 @@ pub fn clean(text: &str) -> Option<String> {
         }
         None
     })
+}
+
+/// Test hook: in debug builds, text containing the value of `QUARRY_TEST_FAIL_REDACTION` fails to
+/// clean, so end-to-end tests can see what callers do when redaction fails. No real input is known
+/// to fail. Release builds leave this out, and it can only withhold text, never reveal it.
+#[cfg(debug_assertions)]
+fn test_failure(text: &str) -> bool {
+    static MARKER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MARKER
+        .get_or_init(|| std::env::var("QUARRY_TEST_FAIL_REDACTION").ok().filter(|m| !m.is_empty()))
+        .as_deref()
+        .is_some_and(|m| text.contains(m))
+}
+
+#[cfg(not(debug_assertions))]
+fn test_failure(_: &str) -> bool {
+    false
 }
 
 /// Runs a redaction step so that a panic withholds the text instead of ending the search.

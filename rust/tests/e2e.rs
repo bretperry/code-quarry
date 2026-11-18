@@ -633,6 +633,35 @@ fn a_file_that_vanishes_or_cannot_be_read_is_skipped_quietly() {
 }
 
 #[test]
+fn a_file_that_fails_redaction_is_withheld_and_named() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("ok.txt", "needle\n");
+    repo.write("src/bad.txt", "needle BREAK_REDACTION_HERE\nonly_in_bad\n");
+    // Debug builds fail to clean any text holding the value of this variable.
+    let grep = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_quarry"))
+            .arg("grep")
+            .args(args)
+            .current_dir(&repo.0)
+            .env("QUARRY_TEST_FAIL_REDACTION", "BREAK_REDACTION_HERE")
+            .output()
+            .unwrap();
+        (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+    };
+    let note = "quarry: withheld 1 file (redaction failed: src/bad.txt)\n";
+    assert_eq!(grep(&["needle"]), (0, "ok.txt:1:needle\n".into(), note.into()));
+    assert_eq!(grep(&["-l", "needle"]), (0, "ok.txt\n".into(), note.into()));
+    assert_eq!(grep(&["-c", "needle"]), (0, "ok.txt:1\n".into(), note.into()));
+    // A match only in the withheld file is no match, and the note is the same.
+    assert_eq!(grep(&["only_in_bad"]), (1, String::new(), note.into()));
+    assert_eq!(grep(&["-c", "BREAK_REDACTION"]), (1, String::new(), note.into()));
+    // Without the hook the same file is searched, so the test above is about the hook.
+    let r = repo.grep(&["-l", "only_in_bad"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (0, "src/bad.txt\n", ""));
+}
+
+#[test]
 fn an_empty_repo_has_no_match_and_a_nested_repo_is_named_as_not_searched() {
     let repo = Repo::new();
     repo.git_init();
