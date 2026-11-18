@@ -993,3 +993,75 @@ fn a_secret_inside_a_quoted_command_does_not_show() {
     assert_eq!(r.code, 0);
     assert!(!r.out.contains("LEAKV12") && !r.out.contains("LEAKV13"), "{}", r.out);
 }
+
+/// Every leak reported in QA rounds 1 to 4, as (file, content, secret). Values are plain words,
+/// so the generic random-string detector can't be what hides them.
+const KNOWN_LEAKS: &[(&str, &str, &str)] = &[
+    // Round 1.
+    ("r1/a.yml", "password: correct horse plainleak01 staple\n", "plainleak01"),
+    ("r1/b.sh", "PASSWORD=abc\\ def\\ plainleak02\n", "plainleak02"),
+    ("r1/c.xml", "<password>plainleak03</password>\n", "plainleak03"),
+    ("r1/d.toml", "secret = [\n \"plainleak04\",\n]\n", "plainleak04"),
+    ("r1/e.json", "{\"tokens\": [\n  \"plainleak05\"\n]}\n", "plainleak05"),
+    ("r1/app.env.txt", "X=plainleak06\n", "plainleak06"),
+    ("r1/.dev.vars", "X=plainleak07\n", "plainleak07"),
+    // Round 2.
+    ("r2/f.sh", "echo \"db_password: plainleak08\" >> f\n", "plainleak08"),
+    ("r2/g.sh", "curl -H \"X-Api-Key: plainleak09\" -H \"Accept: x\" url\n", "plainleak09"),
+    ("r2/h.py", "print(\"secret = plainleak10\", file=x)\n", "plainleak10"),
+    ("r2/i.py", "s = \"api_key: plainleak11\"; t = 1\n", "plainleak11"),
+    ("r2/j.yml", "password: &p plainleak12\n", "plainleak12"),
+    ("r2/k.yml", "password:\n  plainleak13\nname: x\n", "plainleak13"),
+    ("r2/l.yml", "passwords: [plainleak14, other]\n", "plainleak14"),
+    ("r2/m.yml", "secrets:\n  a: plainleak15\n", "plainleak15"),
+    ("r2/n.toml", "[secrets]\ndb = \"plainleak16\"\n", "plainleak16"),
+    ("r2/o.json", "{\n  \"secret\": {\n    \"a\": \"plainleak17\"\n  }\n}\n", "plainleak17"),
+    ("r2/p.yml", "kind: Secret\ndata:\n  user: plainleak18\n", "plainleak18"),
+    ("r2/q.xml", "<property>\n  <name>db.password</name>\n  <value>plainleak19</value>\n</property>\n", "plainleak19"),
+    ("r2/r.xml", "<entry key=\"password\">plainleak20</entry>\n", "plainleak20"),
+    ("r2/s.xml", "<setting name=\"ApiKey\">\n  <value>plainleak21</value>\n</setting>\n", "plainleak21"),
+    ("r2/t.ini", "password = correct plainleak22 horse\n", "plainleak22"),
+    ("r2/u.sh", "DB_PASSWORD=a plainleak23 b\n", "plainleak23"),
+    ("r2/Dockerfile", "ENV DB_PASSWORD plainleak24\n", "plainleak24"),
+    ("r2/v.http", "Authorization: Token plainleak25\n", "plainleak25"),
+    // Round 3.
+    ("r3/w.ts", "class A {\n  authorization: string = plainleak26\n}\n", "plainleak26"),
+    ("r3/x.toml", "[auth]\nenabled = true\njwt_secret = \"plainleak27\"\n", "plainleak27"),
+    // Round 4.
+    ("r4/a.py", "password = b'plainleak28'\n", "plainleak28"),
+    ("r4/b.py", "password = rb'plainleak29'\ntoken = f'plainleak30'\n", "plainleak29"),
+    ("r4/b2.py", "token = f'plainleak30'\nsecret = u'plainleak31'\n", "plainleak30"),
+    ("r4/c.py", "psycopg2.connect(\"dbname=t user=u password=plainleak32\")\n", "plainleak32"),
+    ("r4/d.cs", "var c = \"Server=db;Password=plainleak33;User Id=bob\";\n", "plainleak33"),
+    ("r4/e.yml", "secrets:\n  - name: x\n    value: plainleak34\n", "plainleak34"),
+    ("r4/f.yml", "secrets:\n  key: plainleak35\n", "plainleak35"),
+    ("r4/g.yml", "credentials:\n  name: admin\n  key: plainleak36\n", "plainleak36"),
+    ("r4/h.yml", "secrets:\n  default: plainleak37\n", "plainleak37"),
+    ("r4/i.yml", "auth:\n  password:\n    key: plainleak38\n", "plainleak38"),
+    ("r4/j.yml", "secret_value: |\n  plainleak39\n", "plainleak39"),
+    ("r4/k.yml", "credentials_json: |\n  {\"k\": \"plainleak40\"}\n", "plainleak40"),
+    ("r4/l.sh", "curl -H \"X-Api-Key: ab$plainleak41\"\n", "plainleak41"),
+    ("r4/m.yml", "secrets:\n  db: Plainleak42/abcdEFGH1234+\n", "Plainleak42"),
+    ("r4/n.yml", "tokens:\n  - 550e8400-e29b-41d4-a716-446655440000\n", "550e8400-e29b-41d4-a716-446655440000"),
+    ("r4/o.toml", "[secrets]\nlist = [\n  \"a\",\n]\nlater = \"plainleak43\"\n", "plainleak43"),
+];
+
+#[test]
+fn every_known_leak_stays_hidden() {
+    let repo = Repo::new();
+    repo.git_init();
+    for (path, text, _) in KNOWN_LEAKS {
+        repo.write(path, text);
+    }
+    let all = repo.grep(&["-n", "."]);
+    for (path, _, secret) in KNOWN_LEAKS {
+        assert!(!all.out.contains(secret) && !all.err.contains(secret), "{path}: {secret} shows in -n .");
+        for mode in [&["-F"][..], &["-l", "-F"], &["-c", "-F"], &["-i", "-F"]] {
+            let mut args = mode.to_vec();
+            args.extend(["--", secret]);
+            let r = repo.grep(&args);
+            assert_eq!((r.code, r.out.as_str()), (1, ""), "{path}: {args:?} found {secret}");
+            assert!(!r.err.contains(secret), "{path}: {secret} on stderr");
+        }
+    }
+}
