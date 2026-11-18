@@ -1353,7 +1353,17 @@ fn yaml_block(text: &str, mut at: usize, indent: usize, mode: Block, spans: &mut
                     }
                     continue;
                 }
-                skip_inline_space(bytes, item + offset)
+                let value = skip_inline_space(bytes, item + offset);
+                // `key: token` beside `name: my-secret` points at a field of a Kubernetes Secret
+                // (a SecretKeySelector): a plain lowercase word is a key name, not a value.
+                let named = text[value..end].trim_matches(['"', '\'']);
+                if key.eq_ignore_ascii_case("key")
+                    && !named.is_empty()
+                    && named.bytes().all(|b| b.is_ascii_lowercase() || matches!(b, b'.' | b'_' | b'-'))
+                {
+                    continue;
+                }
+                value
             }
             None => item,
         };

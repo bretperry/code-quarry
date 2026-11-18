@@ -539,6 +539,8 @@ fn real_config_and_code_shapes_are_not_redacted() {
         "<TableHead key=\"access-key-id\">Access key ID</TableHead>\n",
         "const keys: ApiKey[] = [\n  { name: 'publishable', type: 'publishable' },\n]\n",
         "{\n  'v1-list-all-secrets': {\n    content: {\n      'application/json': components['schemas']['SecretResponse'][]\n    }\n  }\n}\n",
+        // SecretKeySelectors: `key` names a field of a Kubernetes Secret.
+        "authorization:\n  credentials:\n    name: my-token-secret\n    key: token\ns3:\n  accessKeySecret:\n    name: minio\n    key: accesskey\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];

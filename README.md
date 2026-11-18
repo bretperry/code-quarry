@@ -129,6 +129,7 @@ quarry protects what passes through quarry. An agent that skips quarry and opens
 - Under a secret-named YAML key (`secrets:`), a child value that is prose, a path, a slug like `my-db`, a number, or a template, or that sits under a schema key such as `type`, `description` or `enabled`, is shown. Translated text under such keys is shown too.
 - The Arabic letter mark (U+061C) in a file name is printed as is; other direction marks are escaped.
 - A key that names a Kubernetes Secret rather than holding one is never redacted: names starting with `existing` (`existingSecret`) or containing `pull` (`imagePullSecrets`).
+- Under a secret-named YAML key, `key:` with a value of only lowercase letters (`key: token`) reads as a field name in a Kubernetes Secret reference and is shown; one with a digit, capital or symbol is hidden.
 - A translated label without sentence punctuation under a key ending in `credential(s)` or `password` (`webauthn_credentials: Credenciales WebAuthn`) may be hidden.
 - Files with NUL bytes, and UTF-16 without a byte-order mark or mostly non-ASCII text, are skipped without a note; `quarry grep` names only files over 500 KB or not UTF-8 that it can recognize.
 
