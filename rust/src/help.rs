@@ -84,11 +84,15 @@ Options
 
 Exit codes: 0 a match, 1 no match, 2 an error.
 
-In a git repo it searches the tracked and unignored files. Elsewhere it
-walks the folder and skips folders that start with a dot. Files over 500 KB,
-binary files, and symlinks are skipped. Sensitive files are withheld and
-named on stderr, as is a count of files that had redactions: a match inside
-a redacted part can't show.
+In a git repo it searches the tracked and unignored files, plus any file
+named on the command line. Elsewhere it walks the folder and skips folders
+that start with a dot. .git is never searched. Binary files and symlinks
+are skipped; files over 500 KB or not UTF-8 are skipped and named on stderr.
+Sensitive files are withheld and named on stderr, as is a count of files
+that had redactions: a match inside a redacted part can't show.
+
+Search is always recursive and patterns are already extended regex, so -r
+and -E are not needed. -e, -o, -v and -P are not supported.
 
 Output is cut at 20,000 characters, and lines at 300.
 

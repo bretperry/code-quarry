@@ -7,7 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use regex::{Regex, RegexBuilder};
@@ -56,6 +57,21 @@ fn misuse(what: &str) -> String {
 
 const NO_PERL: &str = "quarry: -P is not supported (Rust regex syntax only)";
 
+/// grep flags quarry does not take, with what to do instead. The CLI is fixed, so these are errors
+/// that say how to get the same result.
+fn unsupported(flag: &str) -> Option<String> {
+    let why = match flag {
+        "r" | "R" | "recursive" | "dereference-recursive" => "is not needed (search is always recursive); drop it",
+        "E" | "extended-regexp" => "is not needed (patterns are already extended regex); drop it",
+        "e" | "regexp" => "is not supported; pass the pattern as the first argument (after -- if it starts with -)",
+        "o" | "only-matching" => "is not supported; matching lines print whole",
+        "v" | "invert-match" => "is not supported; quarry grep prints only matching lines",
+        _ => return None,
+    };
+    let dash = if flag.len() == 1 { "-" } else { "--" };
+    Some(format!("quarry: {dash}{flag} {why}"))
+}
+
 /// Reads the arguments after `quarry grep`.
 pub fn parse(args: Vec<String>) -> Result<Options, String> {
     let mut o = Options::default();
@@ -74,7 +90,7 @@ pub fn parse(args: Vec<String>) -> Result<Options, String> {
                 "no-ignore" => o.no_ignore = true,
                 "repo" => o.repo = Some(PathBuf::from(args.next().ok_or_else(|| misuse("--repo needs a folder"))?)),
                 "perl-regexp" => return Err(NO_PERL.into()),
-                _ => return Err(misuse(&format!("unknown option --{long}"))),
+                _ => return Err(unsupported(long).unwrap_or_else(|| misuse(&format!("unknown option --{long}")))),
             }
         } else {
             let cluster: Vec<char> = a[1..].chars().collect();
@@ -109,7 +125,7 @@ pub fn parse(args: Vec<String>) -> Result<Options, String> {
                         }
                         break;
                     }
-                    _ => return Err(misuse(&format!("unknown option -{c}"))),
+                    _ => return Err(unsupported(&c.to_string()).unwrap_or_else(|| misuse(&format!("unknown option -{c}")))),
                 }
             }
         }
@@ -175,7 +191,13 @@ fn cut_line(text: &str) -> String {
 }
 
 /// Searches one file's clean text. Pure: no files, no raw text.
+#[cfg(test)]
 pub fn search_text(path: &str, clean: &str, m: &Matcher) -> FileHits {
+    search_text_with(path, clean, m, true)
+}
+
+/// `search_text`, keeping the printed lines only when `store` is set. Without it, only counts.
+fn search_text_with(path: &str, clean: &str, m: &Matcher, store: bool) -> FileHits {
     let lines: Vec<&str> = clean.lines().collect();
     let limit = m.max.unwrap_or(usize::MAX);
     let mut matched: Vec<usize> = Vec::new();
@@ -191,7 +213,7 @@ pub fn search_text(path: &str, clean: &str, m: &Matcher) -> FileHits {
         }
     }
     let mut hits = FileHits { count: matched.len(), lines: Vec::new() };
-    if m.mode != Mode::Lines || matched.is_empty() {
+    if m.mode != Mode::Lines || matched.is_empty() || !store {
         return hits;
     }
     let mut is_match = vec![false; lines.len()];
@@ -218,6 +240,16 @@ pub fn search_text(path: &str, clean: &str, m: &Matcher) -> FileHits {
     hits
 }
 
+/// The characters `lines` add to output that already holds `used`, as `render` counts them.
+fn cost(lines: &[Line], context: bool, mut used: usize) -> usize {
+    let start = used;
+    for line in lines {
+        let gap = context && line.gap_before && used > 0;
+        used += line.text.chars().count() + 1 + if gap { 3 } else { 0 };
+    }
+    used - start
+}
+
 /// Turns the files' results (paths in order, matching files only) into stdout.
 pub fn render(results: &[(String, FileHits)], mode: Mode, context: bool) -> String {
     let (mut out, mut chars, mut shown) = (String::new(), 0usize, 0usize);
@@ -236,6 +268,11 @@ pub fn render(results: &[(String, FileHits)], mode: Mode, context: bool) -> Stri
                 &own
             }
         };
+        // Lines left out to save memory: output was already full before this file.
+        if mode == Mode::Lines && hits.count > 0 && lines.is_empty() {
+            cut = true;
+            break;
+        }
         for line in lines {
             let gap = context && mode == Mode::Lines && line.gap_before && !out.is_empty();
             let cost = line.text.chars().count() + 1 + if gap { 3 } else { 0 };
@@ -253,7 +290,8 @@ pub fn render(results: &[(String, FileHits)], mode: Mode, context: bool) -> Stri
         }
     }
     let left = total.saturating_sub(shown);
-    if cut && left > 0 {
+    // A cut that drops only context lines still says so, with 0 more matches.
+    if cut {
         let (one, many) = if mode == Mode::Lines { ("match", "matches") } else { ("file", "files") };
         out.push_str(&format!(
             "... [cut: {left} more {}. Narrow the pattern or add -g]\n",
@@ -443,9 +481,13 @@ pub fn list_files(root: &Path, targets: &[String], no_ignore: bool) -> Vec<Strin
             }
         }
     }
+    // A file named on the command line is searched even when git ignores it.
+    files.extend(targets.iter().filter(|t| !t.is_empty() && fs::symlink_metadata(root.join(t)).is_ok_and(|m| m.is_file())).cloned());
     if !targets.is_empty() {
         files.retain(|f| targets.iter().any(|t| t.is_empty() || f == t || f.strip_prefix(t.as_str()).is_some_and(|r| r.starts_with('/'))));
     }
+    // `.git` and the index are never searched, even when named: `quarry grep x .git`.
+    files.retain(|f| !f.split('/').any(always_skipped));
     files.sort();
     files.dedup();
     files
@@ -457,53 +499,121 @@ enum Outcome {
     Searched { hits: FileHits, redacted: bool },
     Sensitive,
     Failed,
+    NotText,
     Submodule,
     Skipped,
 }
 
-fn process(root: &Path, rel: &str, m: &Matcher) -> Outcome {
+fn process(root: &Path, rel: &str, m: &Matcher, store: bool) -> Outcome {
     match index::read_clean(root, rel) {
-        Ok(source) => Outcome::Searched { hits: search_text(rel, &source.clean, m), redacted: source.is_redacted() },
+        Ok(source) => {
+            Outcome::Searched { hits: search_text_with(&display_path(rel), &source.clean, m, store), redacted: source.is_redacted() }
+        }
         Err(Refused::Sensitive) => Outcome::Sensitive,
         Err(Refused::Withheld) => Outcome::Failed,
+        Err(Refused::NotText) => Outcome::NotText,
         // A folder in the file list is a submodule or a nested repo; git lists it as one entry.
         Err(Refused::Unreadable) if fs::symlink_metadata(root.join(rel)).is_ok_and(|m| m.is_dir()) => Outcome::Submodule,
         Err(Refused::Unreadable) => Outcome::Skipped,
     }
 }
 
-/// Searches every file on a few threads. Outcomes come back in file order.
-fn search_all(root: &Path, files: &[String], m: &Matcher) -> Result<Vec<Outcome>, String> {
+/// Results gathered in file order, so output memory stays near one output's worth.
+struct Collector {
+    slots: Vec<Option<Outcome>>,
+    /// Every slot before this is filled and counted against `used`.
+    frontier: usize,
+    /// Characters the results before `frontier` add to output.
+    used: usize,
+}
+
+impl Collector {
+    /// Files past this point only need counts: the output before them is already full.
+    fn full(&self) -> bool {
+        self.used > MAX_OUTPUT_CHARS
+    }
+
+    fn put(&mut self, i: usize, mut outcome: Outcome, context: bool) {
+        if self.full()
+            && let Outcome::Searched { hits, .. } = &mut outcome
+        {
+            hits.lines = Vec::new();
+        }
+        self.slots[i] = Some(outcome);
+        let was_full = self.full();
+        while let Some(Some(outcome)) = self.slots.get_mut(self.frontier) {
+            if let Outcome::Searched { hits, .. } = outcome {
+                if self.used > MAX_OUTPUT_CHARS {
+                    hits.lines = Vec::new();
+                } else {
+                    self.used += cost(&hits.lines, context, self.used);
+                }
+            }
+            self.frontier += 1;
+        }
+        if self.full() && !was_full {
+            for outcome in self.slots[self.frontier..].iter_mut().flatten() {
+                if let Outcome::Searched { hits, .. } = outcome {
+                    hits.lines = Vec::new();
+                }
+            }
+        }
+    }
+}
+
+/// Searches every file on a few threads. Outcomes come back in file order. Once the output in file
+/// order is full, later files are only counted.
+fn search_all(root: &Path, files: &[String], m: &Matcher, context: bool) -> Result<Vec<Outcome>, String> {
     let threads = thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_THREADS).min(files.len().max(1));
     let next = AtomicUsize::new(0);
+    let full = AtomicBool::new(false);
     let mut slots: Vec<Option<Outcome>> = Vec::new();
     slots.resize_with(files.len(), || None);
-    thread::scope(|scope| {
+    let collector = Mutex::new(Collector { slots, frontier: 0, used: 0 });
+    let failed = thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
-                    let mut mine = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(rel) = files.get(i) else { break };
-                        mine.push((i, process(root, rel, m)));
+                        let outcome = process(root, rel, m, !full.load(Ordering::Relaxed));
+                        let Ok(mut c) = collector.lock() else { break };
+                        c.put(i, outcome, context);
+                        if c.full() {
+                            full.store(true, Ordering::Relaxed);
+                        }
                     }
-                    mine
                 })
             })
             .collect();
-        for w in workers {
-            for (i, outcome) in w.join().map_err(|_| "quarry: internal error".to_string())? {
-                slots[i] = Some(outcome);
-            }
+        workers.into_iter().map(|w| w.join()).any(|r| r.is_err())
+    });
+    let collector = collector.into_inner().map_err(|_| "quarry: internal error".to_string())?;
+    if failed || collector.slots.iter().any(Option::is_none) {
+        return Err("quarry: internal error".into());
+    }
+    Ok(collector.slots.into_iter().flatten().collect())
+}
+
+/// A path with control characters written out (`\n`, `\t`, `\x1b`), so a file name can't start a
+/// new output line or move the cursor.
+pub fn display_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
         }
-        Ok::<(), String>(())
-    })?;
-    Ok(slots.into_iter().flatten().collect())
+    }
+    out
 }
 
 fn shown_name(path: &str) -> String {
-    redact::clean(path).unwrap_or_else(|| redact::MARK.into())
+    display_path(&redact::clean(path).unwrap_or_else(|| redact::MARK.into()))
 }
 
 fn names(paths: &[String]) -> String {
@@ -520,7 +630,7 @@ fn plural(n: usize, word: &str) -> String {
 
 /// The stderr notes. None of them depends on the pattern, so they tell the reader nothing about
 /// what a secret holds.
-fn notes(sensitive: &[String], failed: &[String], submodules: &[String], redacted: usize) -> Vec<String> {
+fn notes(sensitive: &[String], failed: &[String], not_text: &[String], submodules: &[String], redacted: usize) -> Vec<String> {
     let mut out = Vec::new();
     let withheld = sensitive.len() + failed.len();
     if withheld > 0 {
@@ -532,6 +642,9 @@ fn notes(sensitive: &[String], failed: &[String], submodules: &[String], redacte
             why.push(format!("redaction failed: {}", names(failed)));
         }
         out.push(format!("quarry: withheld {} ({})", plural(withheld, "file"), why.join("; ")));
+    }
+    if !not_text.is_empty() {
+        out.push(format!("quarry: skipped {} (over 500 KB or not UTF-8: {})", plural(not_text.len(), "file"), names(not_text)));
     }
     if !submodules.is_empty() {
         out.push(format!("quarry: {} not searched ({})", plural(submodules.len(), "submodule"), names(submodules)));
@@ -564,30 +677,31 @@ pub fn run(args: Vec<String>) -> Result<i32, String> {
     let targets = o.paths.iter().map(|p| relative_target(&root, p)).collect::<Result<Vec<_>, _>>()?;
 
     let files: Vec<String> = list_files(&root, &targets, o.no_ignore).into_iter().filter(|f| globs.allows(f)).collect();
-    let outcomes = search_all(&root, &files, &matcher)?;
+    let context = o.after > 0 || o.before > 0;
+    let outcomes = search_all(&root, &files, &matcher, context)?;
 
-    let (mut sensitive, mut failed, mut submodules) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut sensitive, mut failed, mut not_text, mut submodules) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut redacted, mut results) = (0, Vec::new());
     for (rel, outcome) in files.into_iter().zip(outcomes) {
         match outcome {
             Outcome::Searched { hits, redacted: r } => {
                 redacted += usize::from(r);
                 if hits.count > 0 {
-                    results.push((rel, hits));
+                    results.push((display_path(&rel), hits));
                 }
             }
             Outcome::Sensitive => sensitive.push(rel),
             Outcome::Failed => failed.push(rel),
+            Outcome::NotText => not_text.push(rel),
             Outcome::Submodule => submodules.push(rel),
             Outcome::Skipped => {}
         }
     }
-    let context = o.after > 0 || o.before > 0;
     let out = render(&results, o.mode, context);
     if !out.is_empty() {
         crate::emit(&out);
     }
-    for note in notes(&sensitive, &failed, &submodules, redacted) {
+    for note in notes(&sensitive, &failed, &not_text, &submodules, redacted) {
         eprintln!("{note}");
     }
     Ok(if results.is_empty() { 1 } else { 0 })

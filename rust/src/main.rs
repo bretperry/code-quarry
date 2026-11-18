@@ -33,8 +33,9 @@ fn misuse(what: &str, command: &str) -> String {
     format!("quarry: {what}\nRun `quarry help {command}` for how to use it.")
 }
 
+/// `-h` or `--help` before any `--`; after it, they are arguments (`quarry grep -- -h`).
 fn wants_help(args: &[String]) -> bool {
-    args.iter().any(|a| a == "-h" || a == "--help")
+    args.iter().take_while(|a| *a != "--").any(|a| a == "-h" || a == "--help")
 }
 
 fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {

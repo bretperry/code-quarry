@@ -614,7 +614,7 @@ fn outside_git_it_walks_the_folder_and_skips_dot_folders() {
 }
 
 #[test]
-fn a_file_that_vanishes_or_cannot_be_read_is_skipped_quietly() {
+fn a_file_that_vanishes_or_is_binary_is_skipped_quietly_and_one_too_big_or_not_utf8_is_named() {
     let repo = Repo::new();
     repo.git_init();
     repo.write("gone.txt", "needle\n");
@@ -622,6 +622,7 @@ fn a_file_that_vanishes_or_cannot_be_read_is_skipped_quietly() {
     repo.write("binary.bin", "needle\0\n");
     repo.write("big.txt", &format!("needle\n{}", "x\n".repeat(300_000)));
     repo.write("utf16.txt", "n\0e\0e\0d\0l\0e\0");
+    fs::write(repo.0.join("latin1.txt"), b"needle caf\xe9\n").unwrap();
     assert!(Command::new("git").args(["add", "."]).current_dir(&repo.0).status().unwrap().success());
     fs::remove_file(repo.0.join("gone.txt")).unwrap();
     let outside = std::env::temp_dir().join(format!("quarry-outside-{}", std::process::id()));
@@ -629,10 +630,15 @@ fn a_file_that_vanishes_or_cannot_be_read_is_skipped_quietly() {
     symlink(&outside, repo.0.join("link.txt")).unwrap();
     let r = repo.grep(&["-l", "needle"]);
     let _ = fs::remove_file(&outside);
-    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (0, "kept.txt\n", ""));
+    let note = "quarry: skipped 3 files (over 500 KB or not UTF-8: big.txt, latin1.txt, utf16.txt)\n";
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (0, "kept.txt\n", note));
+    // The note does not depend on the pattern: a pattern found nowhere gets the same one.
+    let none = repo.grep(&["-l", "absent"]);
+    assert_eq!((none.code, none.out.as_str(), none.err.as_str()), (1, "", note));
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "the redaction-failure hook exists only in debug builds")]
 fn a_file_that_fails_redaction_is_withheld_and_named() {
     let repo = Repo::new();
     repo.git_init();
@@ -757,4 +763,199 @@ fn setup_names_quarry_grep_in_the_rule() {
     repo.write("a.py", "def f():\n    return 1\n");
     assert!(repo.quarry(&["setup", "--yes"]).status.success());
     assert!(fs::read_to_string(repo.0.join("AGENTS.md")).unwrap().contains("quarry grep"));
+}
+
+#[test]
+fn secrets_never_reach_stderr_through_names_paths_or_errors() {
+    let repo = Repo::new();
+    repo.git_init();
+    let token = fakes()[0].0.clone();
+    repo.write(&format!("notes/{token}.txt"), "needle\n");
+    repo.write("ok.txt", "needle\n");
+    let r = repo.grep(&["needle"]);
+    assert_eq!(r.code, 0);
+    assert!(!r.err.contains(&token) && !r.out.contains(&token), "{}{}", r.out, r.err);
+    assert_eq!(r.err, "quarry: withheld 1 file (sensitive: [REDACTED].txt)\n");
+    // A secret-shaped path argument that does not exist.
+    let r = repo.grep(&["needle", &format!("{token}/x")]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("no such file or folder") && !r.err.contains(&token), "{}", r.err);
+    // A bad regex whose error quotes the pattern.
+    let r = repo.grep(&[&format!("({token}")]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("bad pattern") && !r.err.contains(&token), "{}", r.err);
+    // --repo naming a secret-shaped folder.
+    let r = repo.grep(&["x", "--repo", &format!("/nowhere/{token}")]);
+    assert_eq!(r.code, 2);
+    assert!(!r.err.contains(&token), "{}", r.err);
+}
+
+#[test]
+fn yaml_xml_escaped_and_array_values_do_not_show() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a.yml", "password: correct horse battery staple\nname: fine\n");
+    repo.write("b.sh", "PASSWORD=abc\\ def\\ LEAK1\n");
+    repo.write("c.xml", "<password>LEAK2</password>\n");
+    repo.write("d.toml", "secret = [\n \"LEAK3\",\n]\n");
+    let r = repo.grep(&["-n", "."]);
+    assert_eq!(r.code, 0);
+    for leak in ["battery", "LEAK1", "LEAK2", "LEAK3"] {
+        assert!(!r.out.contains(leak), "{leak}: {}", r.out);
+    }
+    assert!(r.out.contains("a.yml:2:name: fine\n"), "{}", r.out);
+}
+
+#[test]
+fn env_files_under_other_names_are_withheld_and_templates_are_searched() {
+    let repo = Repo::new();
+    repo.git_init();
+    for name in ["app.env.txt", "prod.env.bak", "backup.env.txt", ".dev.vars"] {
+        repo.write(name, "needle=1\n");
+    }
+    repo.write(".env.example", "needle=\n");
+    let r = repo.grep(&["-l", "needle"]);
+    assert_eq!((r.code, r.out.as_str()), (0, ".env.example\n"));
+    assert_eq!(r.err, "quarry: withheld 4 files (sensitive: .dev.vars, app.env.txt, backup.env.txt, prod.env.bak)\n");
+}
+
+#[test]
+fn a_search_folder_inside_a_secrets_folder_is_withheld() {
+    let repo = Repo::new();
+    repo.write(".kube/config", "needle: 1\n");
+    repo.write(".aws/credentials", "needle = 1\n");
+    let kube = run_in(&repo.0.join(".kube"), &["grep", "-n", ".", "config"]);
+    assert_eq!((kube.code, kube.out.as_str(), kube.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: config)\n"));
+    let aws = run_in(&std::env::temp_dir(), &["grep", "needle", "--repo", repo.0.join(".aws").to_str().unwrap(), "."]);
+    assert_eq!((aws.code, aws.out.as_str(), aws.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: credentials)\n"));
+}
+
+#[test]
+fn git_internals_are_never_searched_even_when_named() {
+    let repo = Repo::needle_repo();
+    assert!(Command::new("git").args(["add", "."]).current_dir(&repo.0).status().unwrap().success());
+    for args in [&["--no-ignore", "-l", ".", ".git"][..], &["-l", ".", ".git"], &["-l", ".", ".git/config"]] {
+        let r = repo.grep(args);
+        assert_eq!((r.code, r.out.as_str()), (1, ""), "{args:?}");
+    }
+}
+
+#[test]
+fn control_characters_in_a_file_name_are_escaped() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a\nforged.txt", "needle\n");
+    repo.write("tab\there.txt", "needle\n");
+    let r = repo.grep(&["-l", "needle"]);
+    assert_eq!(r.out, "a\\nforged.txt\ntab\\there.txt\n");
+    assert_eq!(repo.grep(&["needle"]).out, "a\\nforged.txt:1:needle\ntab\\there.txt:1:needle\n");
+    assert_eq!(repo.grep(&["-c", "needle"]).out, "a\\nforged.txt:1\ntab\\there.txt:1\n");
+}
+
+#[test]
+fn grep_flags_quarry_does_not_take_say_what_to_do() {
+    let repo = Repo::needle_repo();
+    for (flag, says) in [
+        ("-r", "quarry: -r is not needed (search is always recursive)"),
+        ("-R", "quarry: -R is not needed (search is always recursive)"),
+        ("-E", "quarry: -E is not needed (patterns are already extended regex)"),
+        ("-e", "quarry: -e is not supported; pass the pattern as the first argument"),
+        ("-o", "quarry: -o is not supported"),
+        ("-v", "quarry: -v is not supported"),
+        ("--recursive", "quarry: --recursive is not needed"),
+        ("-rn", "quarry: -r is not needed"),
+    ] {
+        let r = repo.grep(&[flag, "needle"]);
+        assert_eq!((r.code, r.out.as_str()), (2, ""), "{flag}");
+        assert!(r.err.starts_with(says), "{flag}: {}", r.err);
+    }
+}
+
+#[test]
+fn a_named_file_is_searched_even_when_git_ignores_it() {
+    let repo = Repo::needle_repo();
+    repo.write(".gitignore", "build/\n");
+    repo.write("build/out.log", "needle in log\n");
+    repo.write("build/.env", "needle=1\n");
+    assert_eq!(repo.grep(&["-l", "needle", "build"]).code, 1);
+    let r = repo.grep(&["needle", "build/out.log"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "build/out.log:1:needle in log\n"));
+    // Sensitive rules still apply to a named file.
+    let r = repo.grep(&["needle", "build/.env"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: build/.env)\n"));
+}
+
+#[test]
+fn a_cut_that_drops_only_context_still_says_so() {
+    let repo = Repo::new();
+    repo.git_init();
+    let mut lines = vec!["needle".to_string()];
+    lines.extend((0..400).map(|i| format!("context {i} {}", "c".repeat(80))));
+    repo.write("a.txt", &(lines.join("\n") + "\n"));
+    let r = repo.grep(&["-A", "400", "needle"]);
+    assert_eq!(r.code, 0);
+    assert!(r.out.starts_with("a.txt:1:needle\n"));
+    assert!(r.out.ends_with("... [cut: 0 more matches. Narrow the pattern or add -g]\n"), "{}", &r.out[r.out.len() - 120..]);
+}
+
+#[test]
+fn the_cap_is_one_budget_across_files_and_output_is_the_same_every_run() {
+    let repo = Repo::new();
+    repo.git_init();
+    for i in 0..300 {
+        let body: String = (0..20).map(|j| format!("needle {i} {j} {}\n", "n".repeat(60))).collect();
+        repo.write(&format!("f{i:03}.txt"), &body);
+    }
+    let first = repo.grep(&["needle"]);
+    assert_eq!(first.code, 0);
+    let (body, marker) = first.out.trim_end().rsplit_once('\n').unwrap();
+    assert!(body.chars().count() <= 20_000);
+    assert!(body.starts_with("f000.txt:1:needle 0 0 "));
+    // Lines come in file order with none skipped, so the shown part is a prefix of the whole.
+    let shown = body.lines().count();
+    let expected: Vec<String> = (0..300).flat_map(|i| (0..20).map(move |j| format!("f{i:03}.txt:{}:needle {i} {j} ", j + 1))).collect();
+    for (line, want) in body.lines().zip(&expected) {
+        assert!(line.starts_with(want.as_str()), "{line} vs {want}");
+    }
+    assert_eq!(marker, format!("... [cut: {} more matches. Narrow the pattern or add -g]", 6000 - shown));
+    for _ in 0..5 {
+        assert_eq!(repo.grep(&["needle"]).out, first.out);
+    }
+}
+
+#[test]
+fn help_flags_after_double_dash_are_patterns() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a.txt", "use -h for help\n");
+    let r = repo.grep(&["--", "-h"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "a.txt:1:use -h for help\n"));
+    assert_eq!(repo.grep(&["-F", "--", "--help"]).code, 1);
+    assert!(repo.grep(&["-h"]).out.contains("quarry grep"));
+}
+
+#[test]
+fn env_keys_skips_base64_continuations_and_reads_bom_and_crlf() {
+    let repo = Repo::new();
+    repo.write("x.env", "\u{feff}A=1\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC==\r\nc2VjcmV0cGFzc3dvcmQ=\r\nB=x \\\r\ncontinuedSECRETpart=more\r\nC=2\r\n");
+    let r = run_in(&repo.0, &["env-keys", "x.env"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "A\nB\nC\n"));
+}
+
+/// Scale row: 10,000 files. Run with `cargo test --release -- --ignored at_scale`.
+#[test]
+#[ignore = "slow: writes 10,000 files"]
+fn grep_at_scale_10k_files() {
+    let repo = Repo::new();
+    repo.git_init();
+    for i in 0..10_000 {
+        let body: String = (0..30).map(|j| format!("fn f{j}() {{ let x = {j}; }} // line {j}\n")).collect();
+        let todo = if i % 100 == 0 { "// TODO: check\n" } else { "" };
+        repo.write(&format!("d{}/f{i}.rs", i / 500), &format!("{todo}{body}"));
+    }
+    let started = std::time::Instant::now();
+    let r = repo.grep(&["-c", "TODO"]);
+    let took = started.elapsed();
+    assert_eq!((r.code, r.out.lines().count()), (0, 100), "{}", r.err);
+    eprintln!("grep -c TODO over 10,000 files: {took:?}");
 }

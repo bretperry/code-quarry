@@ -106,7 +106,7 @@ pub fn read_clean(repo: &Path, rel: &str) -> Result<Source, Refused> {
     }
     let full = repo.join(rel);
     let meta = fs::symlink_metadata(&full).map_err(|_| Refused::Unreadable)?;
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+    if !meta.is_file() {
         return Err(Refused::Unreadable);
     }
     // A symlinked parent folder can lead out of the repo even when the file itself isn't a link.
@@ -115,12 +115,19 @@ pub fn read_clean(repo: &Path, rel: &str) -> Result<Source, Refused> {
     if !real.starts_with(real_repo) {
         return Err(Refused::Unreadable);
     }
-    let bytes = fs::read(&full).map_err(|_| Refused::Unreadable)?;
-    let raw = String::from_utf8(bytes).map_err(|_| Refused::Unreadable)?;
-    // NULs mean UTF-16 or binary, where the detectors can't see tokens.
-    if raw.contains('\0') {
-        return Err(Refused::Unreadable);
+    // The repo itself may sit in `~/.aws` or `~/.ssh`, so the folders are checked on the real path.
+    if real.components().any(|c| crate::sensitive::DIRS.iter().any(|d| c.as_os_str().eq_ignore_ascii_case(d))) {
+        return Err(Refused::Sensitive);
     }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(Refused::NotText);
+    }
+    let bytes = fs::read(&full).map_err(|_| Refused::Unreadable)?;
+    // NULs mean UTF-16 or binary, where the detectors can't see tokens.
+    if bytes.contains(&0) {
+        return Err(if looks_utf16(&bytes) { Refused::NotText } else { Refused::Unreadable });
+    }
+    let raw = String::from_utf8(bytes).map_err(|_| Refused::NotText)?;
     let clean = redact::clean(&raw).ok_or(Refused::Withheld)?;
     Ok(Source { raw, clean })
 }
@@ -128,8 +135,22 @@ pub fn read_clean(repo: &Path, rel: &str) -> Result<Source, Refused> {
 #[derive(Debug, PartialEq)]
 pub enum Refused {
     Sensitive,
+    /// Gone, not a regular file, outside the repo, or binary.
     Unreadable,
     Withheld,
+    /// Text quarry can't read: over `MAX_FILE_BYTES`, not UTF-8, or UTF-16.
+    NotText,
+}
+
+/// UTF-16 text: a byte-order mark, or NULs in nearly every other byte of the start.
+fn looks_utf16(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return true;
+    }
+    let head = &bytes[..bytes.len().min(4096)];
+    let pairs = head.len() / 2;
+    let nul_at = |parity: usize| head.iter().skip(parity).step_by(2).filter(|b| **b == 0).count();
+    pairs >= 2 && (nul_at(0).max(nul_at(1)) * 10 >= pairs * 9) && nul_at(0).min(nul_at(1)) * 10 <= pairs
 }
 
 const MAX_COMMENT_LINES: usize = 40;
@@ -251,7 +272,7 @@ pub fn build(repo: &Path) -> Result<String, String> {
                 withheld += 1;
                 continue;
             }
-            Err(Refused::Unreadable) => continue,
+            Err(Refused::Unreadable | Refused::NotText) => continue,
         };
 
         let filename = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();

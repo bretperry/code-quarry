@@ -282,16 +282,20 @@ fn a_bad_glob_is_an_error() {
 fn stderr_notes_match_the_mockup() {
     let one = |s: &str| vec![s.to_string()];
     assert_eq!(
-        notes(&one(".env.local"), &[], &[], 2),
+        notes(&one(".env.local"), &[], &[], &[], 2),
         ["quarry: withheld 1 file (sensitive: .env.local)", "quarry: 2 files had redactions; matches inside them can't show"]
     );
-    assert_eq!(notes(&[], &[], &[], 1), ["quarry: 1 file had redactions; matches inside it can't show"]);
-    assert!(notes(&[], &[], &[], 0).is_empty());
-    assert_eq!(notes(&[], &one("a.rs"), &[], 0), ["quarry: withheld 1 file (redaction failed: a.rs)"]);
-    assert_eq!(notes(&[], &[], &one("vendor/lib"), 0), ["quarry: 1 submodule not searched (vendor/lib)"]);
+    assert_eq!(notes(&[], &[], &[], &[], 1), ["quarry: 1 file had redactions; matches inside it can't show"]);
+    assert!(notes(&[], &[], &[], &[], 0).is_empty());
+    assert_eq!(notes(&[], &one("a.rs"), &[], &[], 0), ["quarry: withheld 1 file (redaction failed: a.rs)"]);
+    assert_eq!(notes(&[], &[], &[], &one("vendor/lib"), 0), ["quarry: 1 submodule not searched (vendor/lib)"]);
+    assert_eq!(
+        notes(&[], &[], &[String::from("big.log"), String::from("latin1.txt")], &[], 0),
+        ["quarry: skipped 2 files (over 500 KB or not UTF-8: big.log, latin1.txt)"]
+    );
     let many: Vec<String> = (0..8).map(|i| format!("k{i}.pem")).collect();
     assert_eq!(
-        notes(&many, &one("b"), &[], 0),
+        notes(&many, &one("b"), &[], &[], 0),
         ["quarry: withheld 9 files (sensitive: k0.pem, k1.pem, k2.pem, k3.pem, k4.pem, +3 more; redaction failed: b)"]
     );
 }
@@ -452,4 +456,30 @@ fn the_loop_would_notice_a_leak() {
     let (text, secrets) = random_file(&mut rng);
     let (_, m) = matcher(&["-F"], &secrets[0]);
     assert_eq!(search_text("f.txt", &text, &m).count, 1);
+}
+
+#[test]
+fn the_output_budget_is_spent_in_file_order_whatever_order_files_finish() {
+    let big = |n: usize| {
+        let lines = (0..n).map(|i| Line { text: format!("f:{i}:{}", "x".repeat(100)), is_match: true, gap_before: false }).collect();
+        Outcome::Searched { hits: FileHits { count: n, lines }, redacted: false }
+    };
+    let mut slots = Vec::new();
+    slots.resize_with(4, || None);
+    let mut c = Collector { slots, frontier: 0, used: 0 };
+    // Files 3, 2 and 1 finish before 0; each alone is over half the budget.
+    for i in [3, 2, 1, 0] {
+        c.put(i, big(120), false);
+    }
+    let kept: Vec<usize> = c
+        .slots
+        .iter()
+        .map(|s| match s {
+            Some(Outcome::Searched { hits, .. }) => hits.lines.len(),
+            _ => usize::MAX,
+        })
+        .collect();
+    // 0 and 1 are kept (1 crosses the cap); 2 and 3 keep only their counts.
+    assert_eq!(kept, [120, 120, 0, 0]);
+    assert!(c.full());
 }
