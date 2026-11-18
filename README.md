@@ -61,12 +61,12 @@ quarry grep [flags] <pattern> [path...]
   exit 0 match · 1 no match · 2 error
 ```
 
-- **No index needed.** It reads the live files, so it is never stale. In a git repo it searches tracked and unignored files; `--no-ignore` searches every file under the target. Outside git it walks the folder and skips folders that start with a dot.
-- **Matching runs on redacted text only.** Every file goes through the same reader `search` uses: sensitive paths, symlinks, binary files, and files over 500 KB are not read, and a file whose redaction fails is withheld. There is no match on raw text first, so `-l`, `-c`, and the exit code tell nothing about a secret.
+- **No index needed.** It reads the live files, so it is never stale. In a git repo it searches tracked and unignored files; `--no-ignore` searches every file under the target, and a file named on the command line is searched even if git ignores it. Outside git it walks the folder and skips folders that start with a dot. `.git` is never searched.
+- **Matching runs on redacted text only.** Every file goes through the same reader `search` uses: sensitive paths, symlinks, and binary files are not read, and a file whose redaction fails is withheld. Files over 500 KB or not in UTF-8 are skipped, and stderr names them. There is no match on raw text first, so `-l`, `-c`, and the exit code tell nothing about a secret. Like ripgrep, `-c` lists only files with a match.
 - **Patterns are Rust regex syntax.** It runs in linear time. Lookaround and backreferences are errors (exit 2), and `-P` is refused. Use `-F` for plain text. A pattern matches within one line.
 - **Redaction can hide a match.** A line with a token, a hash, or a `password = ...` value shows `[REDACTED]` in its place, so grepping for the hidden part finds nothing. stderr counts the files that had redactions. The count does not depend on your pattern.
 - **Output is capped** at 20,000 characters, and lines at 300. When it is cut, the last line says how many matches were left out. Narrow the pattern, or add `-g`.
-- **Speed:** PERF
+- **Speed:** budget is p50 ≤ 250 ms warm and never over 500 ms, for repos up to about 1,000 files. Measured: 199 ms p50 (229 ms max) for `quarry grep TODO` on axios (533 files), on a 4-core 2.1 GHz Xeon. Redaction is most of the time, so fewer cores is slower: 392 ms p50 on 2 cores.
 
 `quarry sensitive-list --json` prints the short list of files that tools should never open raw, as `{dirs, names, extensions, exempt_suffixes}`. A `names` entry ending in `*` means "starts with" (`.env*`), and a name ending in an `exempt_suffixes` entry (`.env.example`) is not on the list. `quarry env-keys <file>` prints a `.env` file's key names, one per line, and never a value.
 
