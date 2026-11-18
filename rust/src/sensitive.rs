@@ -81,6 +81,11 @@ pub fn env_keys(text: &str) -> Vec<String> {
         let was_continued = continued;
         continued = ends_in_backslash(line);
         if was_continued {
+            // Still part of the value: a quote opened here runs on to later lines.
+            open = unclosed_quote(line);
+            if open.is_some() {
+                continued = false;
+            }
             continue;
         }
         // Whatever the line is, a key block it opens hides the lines up to its end.
@@ -109,6 +114,24 @@ pub fn env_keys(text: &str) -> Vec<String> {
         }
     }
     keys
+}
+
+/// The quote left open at the end of `line`, if any.
+fn unclosed_quote(line: &str) -> Option<char> {
+    let mut open: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        match (c, open) {
+            ('\\', Some(q)) if q != '\'' => escaped = !escaped,
+            (q @ ('"' | '\'' | '`'), None) => open = Some(q),
+            (c, Some(q)) if c == q && !escaped => open = None,
+            _ => escaped = false,
+        }
+        if c != '\\' {
+            escaped = false;
+        }
+    }
+    open
 }
 
 /// True when `line` holds an unescaped `quote`.
@@ -243,6 +266,12 @@ mod tests {
         assert_eq!(env_keys(text), ["A", "B", "C", "D", "E"]);
         // A quote opened after a name this does not print still hides the lines inside it.
         assert_eq!(env_keys("my-key=\"first\nsecretPart=x\n\"\nF=1\n"), ["F"]);
+    }
+
+    #[test]
+    fn a_quote_opened_on_a_continued_line_still_hides_its_lines() {
+        assert_eq!(env_keys("A=\\\n\"first\nLEAKkeyA=1\nlast\"\nB=2\n"), ["A", "B"]);
+        assert_eq!(env_keys("A=\\\n\"one line\"\nB=2\n"), ["A", "B"]);
     }
 
     #[test]

@@ -959,3 +959,37 @@ fn grep_at_scale_10k_files() {
     assert_eq!((r.code, r.out.lines().count()), (0, 100), "{}", r.err);
     eprintln!("grep -c TODO over 10,000 files: {took:?}");
 }
+
+#[test]
+fn more_credential_folders_are_withheld_on_the_real_path() {
+    for dir in [".docker", ".azure", ".gcloud", ".secrets", ".config/gcloud"] {
+        let repo = Repo::new();
+        repo.write(&format!("{dir}/settings.json"), "needle\n");
+        let r = run_in(&std::env::temp_dir(), &["grep", "needle", "--repo", repo.0.join(dir).to_str().unwrap()]);
+        assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: settings.json)\n"), "{dir}");
+    }
+    // A generic name is not checked on the real path: a project may live under `private/`.
+    let repo = Repo::new();
+    repo.write("private/proj/a.txt", "needle\n");
+    let r = run_in(&std::env::temp_dir(), &["grep", "-l", "needle", "--repo", repo.0.join("private/proj").to_str().unwrap()]);
+    assert_eq!((r.code, r.out.as_str()), (0, "a.txt\n"));
+}
+
+#[test]
+fn bidi_marks_in_a_file_name_are_escaped() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a\u{202e}txt.exe", "needle\n");
+    repo.write("b\u{200f}.txt", "needle\n");
+    assert_eq!(repo.grep(&["-l", "needle"]).out, "a\\u{202e}txt.exe\nb\\u{200f}.txt\n");
+}
+
+#[test]
+fn a_secret_inside_a_quoted_command_does_not_show() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("setup.sh", "echo \"db_password: LEAKV12\" >> f\ncurl -H \"X-Api-Key: LEAKV13\" -H \"Accept: x\" url\n");
+    let r = repo.grep(&["-n", "."]);
+    assert_eq!(r.code, 0);
+    assert!(!r.out.contains("LEAKV12") && !r.out.contains("LEAKV13"), "{}", r.out);
+}

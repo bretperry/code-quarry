@@ -596,8 +596,8 @@ fn search_all(root: &Path, files: &[String], m: &Matcher, context: bool) -> Resu
     Ok(collector.slots.into_iter().flatten().collect())
 }
 
-/// A path with control characters written out (`\n`, `\t`, `\x1b`), so a file name can't start a
-/// new output line or move the cursor.
+/// A path with control characters and bidi marks written out (`\n`, `\t`, `\x1b`, `\u{202e}`), so
+/// a file name can't start a new output line, move the cursor, or read as another name.
 pub fn display_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -606,6 +606,10 @@ pub fn display_path(path: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            // Bidi and direction marks can make a name read as another one.
+            '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                out.push_str(&format!("\\u{{{:04x}}}", c as u32));
+            }
             c => out.push(c),
         }
     }
