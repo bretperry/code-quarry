@@ -547,7 +547,7 @@ fn notes(sensitive: &[String], failed: &[String], submodules: &[String], redacte
 fn relative_target(root: &Path, arg: &str) -> Result<String, String> {
     let full = root.join(arg);
     let real = full.canonicalize().map_err(|_| format!("quarry: no such file or folder: {}", shown_name(arg)))?;
-    let rel = real.strip_prefix(root).map_err(|_| format!("quarry: {} is outside {}", shown_name(arg), root.display()))?;
+    let rel = real.strip_prefix(root).map_err(|_| format!("quarry: {} is outside {}", shown_name(arg), shown_name(&root.to_string_lossy())))?;
     Ok(slashed(rel))
 }
 
@@ -560,7 +560,7 @@ pub fn run(args: Vec<String>) -> Result<i32, String> {
         Some(p) => p.clone(),
         None => std::env::current_dir().map_err(|e| format!("quarry: {e}"))?,
     };
-    let root = start.canonicalize().ok().filter(|p| p.is_dir()).ok_or_else(|| format!("quarry: no such folder: {}", start.display()))?;
+    let root = start.canonicalize().ok().filter(|p| p.is_dir()).ok_or_else(|| format!("quarry: no such folder: {}", shown_name(&start.to_string_lossy())))?;
     let targets = o.paths.iter().map(|p| relative_target(&root, p)).collect::<Result<Vec<_>, _>>()?;
 
     let files: Vec<String> = list_files(&root, &targets, o.no_ignore).into_iter().filter(|f| globs.allows(f)).collect();
