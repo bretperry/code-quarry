@@ -60,6 +60,11 @@ pub struct Source {
 }
 
 impl Source {
+    /// True when redaction changed the file.
+    pub fn is_redacted(&self) -> bool {
+        self.raw != self.clean
+    }
+
     /// Chunks found by parsing the raw text, since redaction can upset the syntax, with their text
     /// and symbols taken from the clean side. Line numbers match on both sides.
     pub fn chunks(&self, language: &tree_sitter::Language, filename: &str) -> Vec<chunk::Chunk> {

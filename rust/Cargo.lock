@@ -25,6 +25,7 @@ dependencies = [
 name = "code-quarry"
 version = "0.2.0"
 dependencies = [
+ "regex",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-java",

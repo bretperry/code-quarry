@@ -31,6 +31,7 @@ cd ~/Dev/some-repo
 quarry setup                                       # tells your agents about quarry, builds .quarry/index
 quarry search "where do we retry failed requests"
 quarry search "auth" -k 10 --lines 40              # more results, shorter bodies
+quarry grep -n "STRIPE_KEY" -C1                    # exact text, secrets cut out
 ```
 
 What comes back, one block per result: score, `path:lines`, name, then the code itself.
@@ -39,6 +40,35 @@ What comes back, one block per result: score, `path:lines`, name, then the code 
 --- 0.917 scripts/lock.mjs:212-212 stale (function)
 const stale = (held, now) => ...
 ```
+
+## Exact text: `quarry grep`
+
+`quarry search` finds a function by meaning. When you know the exact text, `quarry grep` finds it the way grep does, over the same redacted text `search` prints. A secret's value is not in that text, so no flag, count, or exit code can find it.
+
+```
+$ quarry grep -n "STRIPE_KEY" -C1
+src/pay.ts-11-const client = new Stripe(
+src/pay.ts:12:  process.env.STRIPE_KEY ?? "[REDACTED]",
+src/pay.ts-13-);
+quarry: withheld 1 file (sensitive: .env.local)
+quarry: 2 files had redactions; matches inside them can't show
+```
+
+```
+quarry grep [flags] <pattern> [path...]
+  -F fixed  -i ignore case  -w word  -A/-B/-C <n>  -l files only  -c counts  -m <n> max per file
+  -g <glob> (repeatable; !glob excludes)  --no-ignore  --repo <dir>
+  exit 0 match · 1 no match · 2 error
+```
+
+- **No index needed.** It reads the live files, so it is never stale. In a git repo it searches tracked and unignored files; `--no-ignore` searches every file under the target. Outside git it walks the folder and skips folders that start with a dot.
+- **Matching runs on redacted text only.** Every file goes through the same reader `search` uses: sensitive paths, symlinks, binary files, and files over 500 KB are not read, and a file whose redaction fails is withheld. There is no match on raw text first, so `-l`, `-c`, and the exit code tell nothing about a secret.
+- **Patterns are Rust regex syntax.** It runs in linear time. Lookaround and backreferences are errors (exit 2), and `-P` is refused. Use `-F` for plain text. A pattern matches within one line.
+- **Redaction can hide a match.** A line with a token, a hash, or a `password = ...` value shows `[REDACTED]` in its place, so grepping for the hidden part finds nothing. stderr counts the files that had redactions. The count does not depend on your pattern.
+- **Output is capped** at 20,000 characters, and lines at 300. When it is cut, the last line says how many matches were left out. Narrow the pattern, or add `-g`.
+- **Speed:** PERF
+
+`quarry sensitive-list --json` prints the short list of files that tools should never open raw, as `{dirs, names, extensions, exempt_suffixes}`. A `names` entry ending in `*` means "starts with" (`.env*`), and a name ending in an `exempt_suffixes` entry (`.env.example`) is not on the list. `quarry env-keys <file>` prints a `.env` file's key names, one per line, and never a value.
 
 ## Hand it to your agent
 
@@ -50,7 +80,7 @@ Run `quarry setup` in the repo. It shows what it will write and asks first (`--y
 
 The rule it adds:
 
-> To find where something lives in this repo, run `quarry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. It re-indexes by itself when files change.
+> To find where something lives in this repo, run `quarry search "<plain-English question>"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. It re-indexes by itself when files change. For exact text, run `quarry grep -n "<text>" [path]` instead of grep: it prints the same matching lines with secrets removed.
 
 No hooks or MCP server needed: any agent that can run a shell command can use quarry. The index stays fresh on its own. Each search checks file times (milliseconds) and re-indexes when something changed (about a second). In a git repo with no index yet, the first search builds one.
 
@@ -59,6 +89,7 @@ No hooks or MCP server needed: any agent that can run a shell command can use qu
 ### What quarry guarantees
 
 - **The index stores no source text.** It holds paths, line numbers, symbol names, hashed keywords, and small vectors. All are made from text after redaction.
+- **`quarry grep` can't read a secret back.** It matches only on redacted text, so grepping for a secret's value finds nothing, in any mode.
 - **Redaction runs twice.** Once before indexing, and again on the live file at every search, so an old index can't leak and a secret added after indexing is still caught.
 - **It fails closed.** If redaction panics or won't settle, that file is withheld. Non-UTF-8 files, files with NUL bytes, symlinks, paths leading out of the repo, and files over 500 KB are never read. An index from another version or a different redactor is refused.
 - **Sensitive files are skipped by path**, at index and at search: `.env*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.tfvars`, `*.tfstate`, `id_rsa`, `.npmrc`, `.netrc`, `.ssh/`, `.aws/`, `secrets/`, `keys/`, `private/`, `vault/`, and any filename containing `secret`, `credential`, `password`, `apikey`, or `service-account`. A real code file with such a name, like `secrets_manager.py`, isn't searchable.

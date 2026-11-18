@@ -1,9 +1,11 @@
 mod chunk;
 mod embed;
+mod grep;
 mod help;
 mod index;
 mod redact;
 mod search;
+mod sensitive;
 mod setup;
 mod store;
 mod terms;
@@ -72,6 +74,30 @@ fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
                 return Err(misuse("search needs a question, like: quarry search \"where do we parse dates\"", "search"));
             }
             search::run(words.join(" "), repo, k, lines, refresh)
+        }
+        Some("grep") => match grep::run(args.collect()) {
+            Ok(0) => Ok(()),
+            Ok(code) => std::process::exit(code),
+            // 2 is for mistakes, so a script can tell them from "no match".
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2)
+            }
+        },
+        Some("sensitive-list") => {
+            let rest: Vec<String> = args.collect();
+            if rest != ["--json"] {
+                return Err(misuse("sensitive-list needs --json, like: quarry sensitive-list --json", "sensitive-list"));
+            }
+            emit(&sensitive::json());
+            Ok(())
+        }
+        Some("env-keys") => {
+            let rest: Vec<String> = args.collect();
+            match rest.as_slice() {
+                [file] if !file.starts_with('-') => sensitive::run_env_keys(file),
+                _ => Err(misuse("env-keys takes one file, like: quarry env-keys .env", "env-keys")),
+            }
         }
         Some("setup") => {
             let (mut folder, mut yes) = (None, false);
