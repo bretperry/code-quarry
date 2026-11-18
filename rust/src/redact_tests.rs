@@ -533,6 +533,12 @@ fn real_config_and_code_shapes_are_not_redacted() {
         // Chart values naming Secrets and files, and a Secret's metadata.
         "tlsSecret:\n  enabled: false\n  certItem: tls.crt\n  keyItem: tls.key\nglobal:\n  imagePullSecrets:\n  - pullSecret1\n",
         "repo-credentials:\n  apiVersion: v1\n  metadata:\n    labels:\n      argocd.argoproj.io/secret-type: repository\n",
+        // TypeScript and JSX.
+        "token = captchaResponse?.response ?? null\n",
+        "<AuthContext.Provider value={value}>{children}</AuthContext.Provider>\n<Token>{t}</Token>\n",
+        "<TableHead key=\"access-key-id\">Access key ID</TableHead>\n",
+        "const keys: ApiKey[] = [\n  { name: 'publishable', type: 'publishable' },\n]\n",
+        "{\n  'v1-list-all-secrets': {\n    content: {\n      'application/json': components['schemas']['SecretResponse'][]\n    }\n  }\n}\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];

@@ -911,7 +911,10 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     let v = skip_inline_space(bytes, after_op);
     // One that closes on its own line is left to the line rules below (`[]byte("x")`).
     // An object only under a quoted (JSON) name: `secret = {` or `ScmCreds => {` opens code.
+    // After a type (`keys: ApiKey[] = [`), the name is a type, not the variable.
+    let typed = after_op > after_name && bytes[after_name] != op_byte;
     if let Some(&open @ (b'[' | b'{')) = bytes.get(v)
+        && !typed
         && names_a_secret_block(name)
         // `tokens = [` in code is a tokenizer's list far more often than a list of secrets.
         && (name_was_quoted || !name_words(name).last().is_some_and(|w| w == "token" || w == "tokens"))
@@ -1062,6 +1065,11 @@ fn xml_element_value(text: &str, start: usize, name_end: usize) -> Option<Range<
     }
     let close = format!("</{}>", &text[start..name_end]);
     let end = text[gt + 1..line].find(&close).map(|p| gt + 1 + p)?;
+    // JSX: `<AuthContext.Provider value={v}>{children}</AuthContext.Provider>`.
+    let inner = &text[gt + 1..end];
+    if inner.trim_start().starts_with('{') || text[start..gt].contains('{') {
+        return None;
+    }
     (end > gt + 1).then_some(gt + 1..end)
 }
 
@@ -1086,9 +1094,20 @@ fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
                     i = r.end.max(i + 1);
                     let after = skip_inline_space(bytes, i);
                     let is_key = bytes.get(after) == Some(&b':') && bytes.get(after + 1) != Some(&b':');
+                    // A value follows `:`, or is an array element after `[` or `,`; `x['key']` is an
+                    // index, not a value.
+                    let before = bytes[..r.start].iter().rposition(|b| !b.is_ascii_whitespace());
+                    let value_position = before.is_some_and(|p| match bytes[p] {
+                        b':' | b',' => true,
+                        b'[' => p == 0 || !(bytes[p - 1].is_ascii_alphanumeric() || matches!(bytes[p - 1], b')' | b']' | b'_')),
+                        _ => false,
+                    });
                     if is_key {
                         key = Some(r.clone());
-                    } else if r.len() > 2 && !key.take().is_some_and(|k| is_schema_key(&String::from_utf8_lossy(&bytes[k]))) {
+                    } else if r.len() > 2
+                        && value_position
+                        && !key.take().is_some_and(|k| is_schema_key(&String::from_utf8_lossy(&bytes[k])))
+                    {
                         spans.push(r);
                     }
                     continue;
@@ -1133,7 +1152,7 @@ fn is_code_value(value: &str) -> bool {
     value.ends_with([',', ';', '{', '(', '[', '\\'])
         || value.starts_with(['$', '{', '[', '(', '*', '!', '%', '<', '@', '&'])
         || value.contains(['(', ')', '{', '`'])
-        || [" = ", "=>", "->", "::", "&&", "||", " + ", " ? "].iter().any(|op| value.contains(op))
+        || [" = ", "=>", "->", "::", "&&", "||", " + ", " ? ", "??", "?."].iter().any(|op| value.contains(op))
         || lower.split_whitespace().any(|w| CODE_KEYWORDS.contains(&w))
         || looks_like_type(value)
 }
@@ -1427,6 +1446,10 @@ fn xml_pairs(text: &str, spans: &mut Spans) {
         let after = tag.end();
         let lt = text[after..].find('<').map_or(text.len(), |p| after + p);
         let own = &text[after..lt];
+        // A UI label naming the field: `<TableHead key="access-key-id">Access key ID</TableHead>`.
+        if is_label(n.as_str(), own.trim()) {
+            continue;
+        }
         if !own.trim().is_empty() {
             let lead = own.len() - own.trim_start().len();
             spans.push(after + lead..after + own.trim_end().len());
