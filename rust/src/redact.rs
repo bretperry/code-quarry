@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 type Spans = Vec<Range<usize>>;
 
@@ -240,6 +240,8 @@ fn find_all(text: &str) -> Spans {
     xml_pairs(text, &mut spans);
     toml_secret_tables(text, &mut spans);
     k8s_secret_data(text, &mut spans);
+    name_value_pairs(text, &mut spans);
+    terraform_secret_blocks(text, &mut spans);
     spans.retain(|s| !text[s.clone()].chars().all(|c| MARK.contains(c) || c.is_whitespace()));
     spans
 }
@@ -654,7 +656,7 @@ fn literals_to_line_end(bytes: &[u8], from: usize, spans: &mut Spans) -> usize {
                 r.end = r.end.min(line_end(bytes, i));
             }
             i = r.end.max(i + 1);
-            if r.len() > 2 {
+            if r.len() > 2 && !is_byte_char_literal(&bytes[r.clone()]) {
                 spans.push(r);
                 found += 1;
             }
@@ -670,7 +672,8 @@ fn literals_to_line_end(bytes: &[u8], from: usize, spans: &mut Spans) -> usize {
 /// variable (README, limits).
 fn bare_value_looks_literal(name: &str, value: &str, tight: bool) -> bool {
     let lower = value.to_ascii_lowercase();
-    if value.is_empty() || CODE_WORDS.contains(&lower.as_str()) {
+    // A placeholder: `password = ?`, `Password={0}`, `password=%s`.
+    if value.is_empty() || CODE_WORDS.contains(&lower.as_str()) || value.starts_with(['?', '{', '%']) {
         return false;
     }
     // `max_tokens = 100` is a count; `password = 100200` isn't.
@@ -842,7 +845,7 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
             .iter()
             .position(|b| *b == q || matches!(b, b' ' | b';' | b'\t'))
             .map_or(line_end(bytes, v), |p| v + p);
-        if end > v && !text[v..].starts_with(MARK) {
+        if end > v && !text[v..].starts_with(MARK) && !is_placeholder(&text[v..end]) {
             spans.push(v..end);
         }
         return;
@@ -943,7 +946,7 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
             || (name_was_quoted && start > 0 && bytes[start - 1] == bytes[name_end] && names_a_secret_table(name)))
         && !bytes[v..line_end(bytes, v)].contains(&if open == b'[' { b']' } else { b'}' })
     {
-        bracket_literals(bytes, v, spans);
+        bracket_literals(bytes, v, names_a_secret_table(name), spans);
         return;
     }
     // A quoted value may sit on the next line: `password =\n    "x"`.
@@ -1037,6 +1040,19 @@ fn trimmed_line_end(bytes: &[u8], from: usize) -> usize {
 }
 
 /// The quote still open at `at`, scanning from `line_start`, if `at` is inside a string.
+/// A one-character literal (`'x'`, `'\\0'`, `'\\x41'`), as in Rust's `b'x'`: never a secret.
+fn is_byte_char_literal(lit: &[u8]) -> bool {
+    let Some(inner) = lit.strip_prefix(b"'").and_then(|l| l.strip_suffix(b"'")) else { return false };
+    inner.len() == 1 || (inner.first() == Some(&b'\\') && inner.len() <= 4)
+}
+
+/// A placeholder, not a value: `%s`, `%(pw)s`, `{pw}`, `{0}`, `?`, `$1`, or an ALL-CAPS name
+/// (`YOUR_PASSWORD`).
+fn is_placeholder(value: &str) -> bool {
+    value.starts_with(['%', '{', '?', '$', '<'])
+        || (value.len() >= 3 && value.bytes().all(|b| b.is_ascii_uppercase() || matches!(b, b'_' | b'-')))
+}
+
 /// `$VAR`, `${VAR}` or `$(cmd)`: a reference, not a value.
 fn is_variable_reference(word: &str) -> bool {
     let Some(rest) = word.strip_prefix('$') else { return false };
@@ -1124,7 +1140,9 @@ fn xml_element_value(text: &str, start: usize, name_end: usize) -> Option<Range<
 
 /// Every quoted literal value in the array or object opening at `open`, up to its matching close,
 /// across lines. An object's keys (`"a":`) stay.
-fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
+/// With `deep` (under `"secrets"`, `"credentials"`, a `[secrets]` table), values at every depth
+/// count; otherwise records inside an array keep their fields.
+fn bracket_literals(bytes: &[u8], open: usize, deep: bool, spans: &mut Spans) {
     let mut depth = 0usize;
     // Objects inside: an array of records (`"password": [{"href": ...}]`) holds fields, not secrets.
     let own_objects = usize::from(bytes[open] == b'{');
@@ -1140,7 +1158,7 @@ fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
             }
             b']' | b'}' => {
                 depth -= 1;
-                objects -= usize::from(bytes[i] == b'}');
+                objects = objects.saturating_sub(usize::from(bytes[i] == b'}'));
                 if depth == 0 {
                     return;
                 }
@@ -1162,7 +1180,8 @@ fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
                         key = Some(r.clone());
                     } else if r.len() > 2
                         && value_position
-                        && objects == own_objects
+                        && (deep || objects == own_objects)
+                        && !is_byte_char_literal(&bytes[r.clone()])
                         && !key.take().is_some_and(|k| is_schema_key(&String::from_utf8_lossy(&bytes[k])))
                     {
                         spans.push(r);
@@ -1406,9 +1425,19 @@ fn yaml_value(text: &str, line_start: usize, v: usize, name: &str, spans: &mut S
     let bytes = text.as_bytes();
     let line = &text[v..line_end(bytes, v)];
     let block_head = line.split(" #").next().unwrap_or("").trim();
-    let mentions = name_words(name)
+    let words = name_words(name);
+    // ... and ends in a word for a secret's content: `secret_value`, `credentials_json`,
+    // `service_account_key`, but not `token_endpoint_auth_methods` or `secret_key_name`.
+    let mentions = words
         .iter()
-        .any(|w| ["secret", "secrets", "password", "passwords", "credential", "credentials", "token", "tokens"].contains(&w.as_str()));
+        .any(|w| ["secret", "secrets", "password", "passwords", "credential", "credentials", "token", "tokens", "key"].contains(&w.as_str()))
+        && words.last().is_some_and(|w| {
+            [
+                "secret", "secrets", "password", "passwords", "credential", "credentials", "token", "tokens", "key", "keys",
+                "json", "pem", "value", "data", "cert", "certificate",
+            ]
+            .contains(&w.as_str())
+        });
     if mentions && matches!(block_head, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
         let indent = bytes[line_start..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
         yaml_block(text, (line_end(bytes, v) + 1).min(bytes.len()), indent, Block::Scalar, spans);
@@ -1423,6 +1452,12 @@ fn yaml_value(text: &str, line_start: usize, v: usize, name: &str, spans: &mut S
     let indent = bytes[line_start..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
     let mut v = v;
     let mut value = text[v..end].trim_end();
+    // `password: !!str value`: a tag names the type.
+    if let Some(tag) = value.strip_prefix("!!") {
+        let skip = 2 + tag.find([' ', '\t']).unwrap_or(tag.len());
+        v = skip_inline_space(bytes, v + skip).min(end);
+        value = text[v..end].trim_end();
+    }
     // `password: &anchor value`: the anchor names the value, it isn't one.
     if let Some(anchor) = value.strip_prefix('&') {
         let skip = 1 + anchor.find([' ', '\t']).unwrap_or(anchor.len());
@@ -1598,7 +1633,7 @@ fn toml_secret_tables(text: &str, spans: &mut Spans) {
                     end
                 }
                 Some(b'[' | b'{') => {
-                    bracket_literals(bytes, v, spans);
+                    bracket_literals(bytes, v, true, spans);
                     bracket_end(bytes, v)
                 }
                 _ => {
@@ -1613,6 +1648,95 @@ fn toml_secret_tables(text: &str, spans: &mut Spans) {
             continue;
         }
         at = stop + 1;
+    }
+}
+
+/// `- name: DB_PASSWORD` with `value: x` beside it (a container's env), or the JSON
+/// `{"name": "DB_PASSWORD", "value": "x"}`: when the name names a secret, its value is one.
+/// `valueFrom:` (a reference) stays.
+fn name_value_pairs(text: &str, spans: &mut Spans) {
+    use std::sync::OnceLock;
+    static YAML_NAME: OnceLock<regex::Regex> = OnceLock::new();
+    static JSON_PAIR: OnceLock<regex::Regex> = OnceLock::new();
+    if !text.contains("name") {
+        return;
+    }
+    let bytes = text.as_bytes();
+    let yaml_name = YAML_NAME.get_or_init(|| regex::Regex::new(r#"(?m)^([ \t]*)(- )?name:[ \t]*["']?([A-Za-z0-9_.\-]+)["']?[ \t]*$"#).unwrap());
+    for c in yaml_name.captures_iter(text) {
+        let (whole, pad, dash, name) = (c.get(0).unwrap(), c.get(1).unwrap(), c.get(2), c.get(3).unwrap());
+        if !names_a_secret(name.as_str()) {
+            continue;
+        }
+        // The mapping's own column: past the `- ` when the name opens a list item.
+        let column = pad.as_str().len() + dash.map_or(0, |d| d.as_str().len());
+        let mut at = whole.end() + 1;
+        while at < bytes.len() {
+            let stop = line_end(bytes, at);
+            let line = &text[at..stop];
+            let lead = line.len() - line.trim_start().len();
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                at = stop + 1;
+                continue;
+            }
+            if lead != column || line.trim_start().starts_with('-') {
+                break;
+            }
+            if let Some(rest) = line.trim_start().strip_prefix("value:") {
+                let v = at + lead + "value:".len();
+                let v = skip_inline_space(bytes, v);
+                let end = trimmed_line_end(bytes, v);
+                if end > v && !rest.trim().is_empty() && !text[v..end].contains("{{") {
+                    spans.push(v..end);
+                }
+                break;
+            }
+            at = stop + 1;
+        }
+    }
+    let json_pair = JSON_PAIR.get_or_init(|| {
+        regex::Regex::new(r#""name"\s*:\s*"([^"]{1,100})"\s*,\s*"value"\s*:\s*("(?:[^"\\]|\\.)*")"#).unwrap()
+    });
+    for c in json_pair.captures_iter(text) {
+        let (name, value) = (c.get(1).unwrap(), c.get(2).unwrap());
+        if names_a_secret(name.as_str()) && value.len() > 2 {
+            spans.push(value.start()..value.end());
+        }
+    }
+}
+
+/// Terraform and HCL: `variable "db_password" { default = "x" }`. In a block whose label names a
+/// secret, `default` and `value` are the secret.
+fn terraform_secret_blocks(text: &str, spans: &mut Spans) {
+    use std::sync::OnceLock;
+    static BLOCK: OnceLock<regex::Regex> = OnceLock::new();
+    static FIELD: OnceLock<regex::Regex> = OnceLock::new();
+    if !text.contains('{') {
+        return;
+    }
+    let block = BLOCK.get_or_init(|| regex::Regex::new(r#"(?m)^[ \t]*(?:variable|output|locals|resource|data)\b[^{\n]*?"([^"\n]+)"[ \t]*\{"#).unwrap());
+    let field = FIELD.get_or_init(|| regex::Regex::new(r#"(?m)\b(?:default|value)[ \t]*=[ \t]*"#).unwrap());
+    let bytes = text.as_bytes();
+    for c in block.captures_iter(text) {
+        let (whole, label) = (c.get(0).unwrap(), c.get(1).unwrap());
+        if !names_a_secret(label.as_str()) {
+            continue;
+        }
+        let open = whole.end() - 1;
+        let close = bracket_end(bytes, open);
+        for f in field.find_iter(&text[open..close]) {
+            let v = open + f.end();
+            match bytes.get(v) {
+                Some(b'"' | b'\'') => spans.extend(quoted_value(bytes, v)),
+                Some(b'[' | b'{') => bracket_literals(bytes, v, true, spans),
+                _ => {
+                    let end = trimmed_line_end(bytes, v);
+                    if end > v {
+                        spans.push(v..end);
+                    }
+                }
+            }
+        }
     }
 }
 

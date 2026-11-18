@@ -1044,6 +1044,29 @@ const KNOWN_LEAKS: &[(&str, &str, &str)] = &[
     ("r4/m.yml", "secrets:\n  db: Plainleak42/abcdEFGH1234+\n", "Plainleak42"),
     ("r4/n.yml", "tokens:\n  - 550e8400-e29b-41d4-a716-446655440000\n", "550e8400-e29b-41d4-a716-446655440000"),
     ("r4/o.toml", "[secrets]\nlist = [\n  \"a\",\n]\nlater = \"plainleak43\"\n", "plainleak43"),
+    // Round 5.
+    ("r5/a.json", "{\n  \"secrets\": {\n    \"prod\": {\n      \"a\": \"plainleak44\"\n    }\n  }\n}\n", "plainleak44"),
+    ("r5/b.json", "{\n  \"secrets\": [\n    {\"name\": \"DB\", \"value\": \"plainleak45\"}\n  ]\n}\n", "plainleak45"),
+    ("r5/c.json", "{\"secrets\": {\"prod\": {\"a\": \"plainleak46\"}}}\n", "plainleak46"),
+    ("r5/d.yml", "env:\n  - name: DB_PASSWORD\n    value: plainleak47\n", "plainleak47"),
+    ("r5/e.json", "[{\"name\": \"DB_PASSWORD\", \"value\": \"plainleak48\"}]\n", "plainleak48"),
+    ("r5/f.tf", "variable \"db_password\" {\n  type    = string\n  default = \"plainleak49\"\n}\n", "plainleak49"),
+    ("r5/g.yml", "password: !!str plainleak50\n", "plainleak50"),
+    // Round 5, the LEAKV inputs as sent.
+    ("v/v1.yml", "password: LEAKV1\n", "LEAKV1"),
+    ("v/v3.yml", "passwords: [LEAKV3, LEAKV4]\n", "LEAKV3"),
+    ("v/v4.yml", "passwords: [LEAKV3, LEAKV4]\n", "LEAKV4"),
+    ("v/v6.yml", "db_password: LEAKV6\n", "LEAKV6"),
+    ("v/v7.yml", "api_key: \"LEAKV7\"\n", "LEAKV7"),
+    ("v/v9.toml", "[secrets]\nkey = 'LEAKV9'\n", "LEAKV9"),
+    ("v/v10.json", "{\"secret\": \"LEAKV10\"}\n", "LEAKV10"),
+    ("v/v11.json", "{\"secrets\": {\"a\": \"LEAKV11\"}}\n", "LEAKV11"),
+    ("v/v16.http", "Authorization: token LEAKV16\n", "LEAKV16"),
+    ("v/v17.yml", "environment:\n  - JWT_SECRET=LEAKV17\n", "LEAKV17"),
+    ("v/v18.yml", "env:\n  API_TOKEN: LEAKV18\n", "LEAKV18"),
+    ("v/v19.properties", "spring.datasource.password=LEAKV19\n", "LEAKV19"),
+    ("v/v21.yml", "postgresql:\n  auth:\n    password: LEAKV21\n", "LEAKV21"),
+    ("v/v22.yml", "credentials:\n  - LEAKV22\n", "LEAKV22"),
 ];
 
 #[test]

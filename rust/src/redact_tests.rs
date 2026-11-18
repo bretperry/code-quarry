@@ -541,6 +541,12 @@ fn real_config_and_code_shapes_are_not_redacted() {
         "{\n  'v1-list-all-secrets': {\n    content: {\n      'application/json': components['schemas']['SecretResponse'][]\n    }\n  }\n}\n",
         // SecretKeySelectors: `key` names a field of a Kubernetes Secret.
         "authorization:\n  credentials:\n    name: my-token-secret\n    key: token\ns3:\n  accessKeySecret:\n    name: minio\n    key: accesskey\n",
+        // Round 5: byte literals, placeholders, block scalars that name a field, a plain env var.
+        "Token::U8(b'x'),\nlet buf = [b'\\0'; 32 * 1024]; // token\n",
+        "q = \"user=%s password=%s\"\nf\"host=x password={pw}\"\nc = \"Password={0};Server=x\"\nsql = \"WHERE password = ?\"\n",
+        "token_endpoint_auth_methods: |\n  client_secret_basic\nsecret_key_name: |\n  my-key\n",
+        "env:\n  - name: HOST\n    value: db\n  - name: API_KEY\n    valueFrom:\n      secretKeyRef:\n        name: x\n",
+        "variable \"region\" {\n  default = \"us-east-1\"\n}\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];
