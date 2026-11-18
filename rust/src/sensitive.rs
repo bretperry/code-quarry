@@ -57,13 +57,25 @@ pub fn env_keys(text: &str) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     // The quote that opened a value still running on later lines.
     let mut open: Option<char> = None;
+    // An unquoted PEM block runs until its END line; its base64 lines can look like `NAME=`.
+    let mut in_pem = false;
     for line in text.lines() {
+        if in_pem {
+            if line.contains("-----END") {
+                in_pem = false;
+                // A quoted block can close its quote on the END line.
+                open = open.filter(|q| !closes(line, *q));
+            }
+            continue;
+        }
         if let Some(q) = open {
             if closes(line, q) {
                 open = None;
             }
             continue;
         }
+        // Whatever the line is, a key block it opens hides the lines up to its end.
+        in_pem = line.contains("-----BEGIN") && !line.contains("-----END");
         let line = line.trim();
         let line = line.strip_prefix("export ").map_or(line, str::trim_start);
         let Some((key, value)) = line.split_once('=') else { continue };
@@ -146,6 +158,18 @@ mod tests {
     }
 
     #[test]
+    fn grep_withholds_everything_on_the_narrow_list() {
+        // grep refuses files by the broad rule, so the broad rule must cover the narrow list.
+        let mut paths: Vec<String> = DIRS.iter().map(|d| format!("x/{d}/f.txt")).collect();
+        paths.extend(NAMES.iter().map(|n| n.replace('*', ".local")));
+        paths.extend(EXTENSIONS.iter().map(|e| format!("a/f.{e}")));
+        for p in paths {
+            assert!(matches(&p), "{p}");
+            assert!(redact::is_sensitive_path(&p), "{p}");
+        }
+    }
+
+    #[test]
     fn json_has_the_four_keys_in_order() {
         let j = json();
         let at = |k: &str| j.find(&format!("\"{k}\"")).unwrap();
@@ -164,6 +188,19 @@ mod tests {
     fn a_value_that_runs_over_several_lines_hides_its_inner_lines() {
         let text = "BEFORE=1\nKEY=\"first line\nSECRET_LOOKING=abc==\nlast line\"\nAFTER='x\ny=z\n'\nEND=1\n";
         assert_eq!(env_keys(text), ["BEFORE", "KEY", "AFTER", "END"]);
+    }
+
+    #[test]
+    fn an_unquoted_key_block_hides_its_lines() {
+        let k = ["RSA PRIVATE", " KEY-----"].concat();
+        let text = format!("A=1\nPRIV=-----BEGIN {k}\nMIIBOgIBAAJBAKj34Gkx=\nAb3xQ==\n-----END {k}\nB=2\n");
+        assert_eq!(env_keys(&text), ["A", "PRIV", "B"]);
+        // One that never ends hides the rest of the file.
+        assert_eq!(env_keys(&format!("A=1\nPRIV=-----BEGIN {k}\nAb3xQ==\nB=2\n")), ["A", "PRIV"]);
+        assert_eq!(env_keys(&format!("A=-----BEGIN {k}x-----END {k}\nB=2\n")), ["A", "B"]);
+        assert_eq!(env_keys(&format!("Q=\"-----BEGIN {k}\nAb3xQ==\n-----END {k}\"\nB=2\n")), ["Q", "B"]);
+        assert_eq!(env_keys(&format!("Q=\"-----BEGIN {k}\nAb3xQ==\n-----END {k}\nx=\"\nB=2\n")), ["Q", "B"]);
+        assert_eq!(env_keys(&format!("not a key: -----BEGIN {k}\nAb3xQ==\n-----END {k}\nB=2\n")), ["B"]);
     }
 
     #[test]
