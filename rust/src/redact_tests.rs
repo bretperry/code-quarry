@@ -308,7 +308,7 @@ fn sensitive_paths() {
 fn yaml_values_under_a_secret_name_are_hidden_whole() {
     for (input, want) in [
         ("password: correct horse battery staple\n", "password: [REDACTED]\n"),
-        ("  - db_password:    two words here  # note\n", "  - db_password:    [REDACTED]\n"),
+        ("  - db_password:    two words here  # note\n", "  - db_password:    [REDACTED]  # note\n"),
         ("\"api_key\": plain words\n", "\"api_key\": [REDACTED]\n"),
         ("password: hunter\n", "password: [REDACTED]\n"),
         ("private_key: |\n  line one\n\n  line two\nafter: ok\n", "private_key: |\n  [REDACTED]\n\n  [REDACTED]\nafter: ok\n"),
@@ -325,6 +325,7 @@ fn code_that_looks_like_yaml_stays_readable() {
         "struct A {\n    password: String,\n}\n",
         "class B:\n    password: str\n    api_key: SecretStr\n    token: Optional[str]\n",
         "interface C {\n  token: string;\n}\n",
+        "auth:\n  user: bob\n  method: basic\n",
         "const o = {\n  password: getPassword(),\n};\n",
         "password: ${DB_PASSWORD}\n",
     ] {
@@ -411,7 +412,7 @@ fn more_yaml_shapes_under_secret_names() {
         ("passwords: [A1, B2]\n", "passwords: [[REDACTED]]\n"),
         ("secrets:\n  a: LEAK1\n  b:\n    c: LEAK2\nname: x\n", "secrets:\n  a: [REDACTED]\n  b:\n    c: [REDACTED]\nname: x\n"),
         ("tokens:\n  - one\n  # a note\n  - two\nname: x\n", "tokens:\n  - [REDACTED]\n  # a note\n  - [REDACTED]\nname: x\n"),
-        ("tokens:\n  - id: 1\n    value: LEAK\n", "tokens:\n  - id: [REDACTED]\n    value: [REDACTED]\n"),
+        ("tokens:\n  - id: 1\n    value: LEAK\n", "tokens:\n  - id: 1\n    value: [REDACTED]\n"),
     ] {
         assert_eq!(clean(input).unwrap(), want, "{input:?}");
     }
@@ -423,7 +424,12 @@ fn toml_tables_and_json_objects_under_secret_names() {
         clean("[app]\nname = \"x\"\n[secrets]\ndb = \"LEAK1\"\nkey = LEAK2\n[other]\nport = 1\n").unwrap(),
         "[app]\nname = \"x\"\n[secrets]\ndb = [REDACTED]\nkey = [REDACTED]\n[other]\nport = 1\n"
     );
-    assert_eq!(clean("[database.password]\nvalue = LEAK\n").unwrap(), "[database.password]\nvalue = [REDACTED]\n");
+    assert_eq!(clean("[database.credentials]\nvalue = LEAK\n").unwrap(), "[database.credentials]\nvalue = [REDACTED]\n");
+    // Other tables keep their values; only secret-named keys are hidden.
+    assert_eq!(
+        clean("[auth]\nenabled = true\nsite_url = \"http://localhost:3000\"\njwt_expiry = 3600\n").unwrap(),
+        "[auth]\nenabled = true\nsite_url = \"http://localhost:3000\"\njwt_expiry = 3600\n"
+    );
     assert_eq!(
         clean("{\n  \"secret\": {\n    \"a\": \"LEAK1\",\n    \"b\": [\"LEAK2\"]\n  },\n  \"name\": \"x\"\n}\n").unwrap(),
         "{\n  \"secret\": {\n    \"a\": [REDACTED],\n    \"b\": [[REDACTED]]\n  },\n  \"name\": \"x\"\n}\n"
@@ -486,5 +492,63 @@ fn more_sensitive_file_names() {
     }
     for p in ["env.ts", "src/env.rs", "env.d.ts", "env.example", "id_rsa.pub", ".env.example", "environment.js", "README.md.bak"] {
         assert!(!is_sensitive_path(p), "{p}");
+    }
+}
+
+// ---- QA round 3: real shapes that must stay readable ----
+
+#[test]
+fn real_config_and_code_shapes_are_not_redacted() {
+    let fixtures = [
+        // argo-helm CRD schema under a secret-named property.
+        "auth:\n  properties:\n    passwordSecret:\n      description: PasswordSecret is the secret selector to the repository password\n      properties:\n        key:\n          description: The key of the secret to select from.\n          type: string\n        name:\n          description: Name of the referent.\n          type: string\n      required:\n      - key\n      type: object\n",
+        // Chart values.
+        "credentials:\n  enabled: true\n  region: us-east-1\nsecret:\n  enabled: false\n  create: true\n",
+        // Supabase config.toml.
+        "[auth]\nenabled = true\nsite_url = \"http://127.0.0.1:3000\"\njwt_expiry = 3600\nenable_signup = true\n",
+        // rubygems en.yml.
+        "en:\n  password_reset: Reset your password by clicking the link\n  credentials_required: Credentials required\n  token_expired: Your token has expired\n",
+        // Helm template under imagePullSecrets.
+        "spec:\n  imagePullSecrets:\n    {{- toYaml . | nindent 8 }}\n  password: {{ .Values.password | quote }}\n",
+        // Compose secrets.
+        "secrets:\n  db_password:\n    file: ./db_password.txt\n  api_key:\n    external: true\n",
+        // OpenAPI password field.
+        "components:\n  schemas:\n    Login:\n      properties:\n        password:\n          type: string\n          format: password\n          description: The user's password\n          minLength: 8\n",
+        // JSON Schema under a quoted password key.
+        "{\n  \"password\": {\n    \"type\": \"string\",\n    \"description\": \"The user's password\"\n  },\n  \"label\": \"x\"\n}\n",
+        // GitHub Actions job named bearer.
+        "jobs:\n  bearer:\n    runs-on: ubuntu-latest\n    needs: build\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n",
+        // Rust lifetimes.
+        "fn f<'a>(password: String, n: &'a str) -> &'a str {\n    n\n}\n",
+        // Prose inside a string.
+        "raise ValueError(\"Invalid token: expected 3 parts\")\n",
+        // Comment after a code value; a command after an env assignment.
+        "token = None  # set later\n",
+        // JSX form field with a secret-ish name.
+        "<FormField\n  control={form.control}\n  name=\"REFRESH_TOKEN_ROTATION_ENABLED\"\n  render={({ field }) => (\n    <FormItemLayout\n",
+        // A list of error codes under auth, and a zod chain.
+        "const C = {\n  auth: [\n    { code: 'session_not_found', description: 'User session not found' },\n  ],\n}\nconst schema = z.object({\n  password: z\n    .string()\n})\n",
+        // Restored: a section named auth.
+        "auth:\n  user: bob\n  method: basic\n",
+    ];
+    for f in fixtures {
+        let out = clean(f).unwrap();
+        assert!(!out.contains(MARK), "over-redacted:\n{f}\n---\n{out}");
+    }
+    assert_eq!(clean("PASSWORD=hunter2x ./run.sh\n").unwrap(), "PASSWORD=[REDACTED] ./run.sh\n");
+}
+
+#[test]
+fn secrets_inside_real_shapes_are_still_hidden() {
+    for (input, secret) in [
+        ("secrets:\n  db_password:\n    value: LEAKA1\n", "LEAKA1"),
+        ("credentials:\n  enabled: true\n  access_key_id: LEAKA2\n", "LEAKA2"),
+        ("[auth]\nenabled = true\njwt_secret = \"LEAKA3\"\n", "LEAKA3"),
+        ("{\n  \"secrets\": {\n    \"type\": \"string\",\n    \"db\": \"LEAKA4\"\n  }\n}\n", "LEAKA4"),
+        ("en:\n  db_password: LEAKA5 words\n", "LEAKA5"),
+        ("echo \"db_password: LEAKA6\" >> f\n", "LEAKA6"),
+        ("class A {\n  authorization: string = hunterAB15\n}\n", "hunterAB15"),
+    ] {
+        assert_gone(input, secret);
     }
 }
