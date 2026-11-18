@@ -125,6 +125,9 @@ quarry protects what passes through quarry. An agent that skips quarry and opens
 - Fullwidth punctuation as the operator: `password＝x`, `password：x`.
 - Generic folder names (`secrets/`, `private/`, `keys/`, `vault/`, `credentials/`) are skipped inside a repo, but not when the search itself starts inside one, since whole projects live under such names.
 - A hardlink to a sensitive file under an ordinary name.
+- Inside a string, a value runs to the closing quote or the first `;`, so a secret containing `;` (`"Password=ab;cd"`) shows its part after the `;`.
+- Under a secret-named YAML key (`secrets:`), a child value that is prose, a path, a slug like `my-db`, a number, or a template, or that sits under a schema key such as `type`, `description` or `enabled`, is shown. Translated text under such keys is shown too.
+- The Arabic letter mark (U+061C) in a file name is printed as is; other direction marks are escaped.
 - Files with NUL bytes, and UTF-16 without a byte-order mark or mostly non-ASCII text, are skipped without a note; `quarry grep` names only files over 500 KB or not UTF-8 that it can recognize.
 
 </details>
