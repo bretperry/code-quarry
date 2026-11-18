@@ -25,24 +25,24 @@ fn walk(dir: &Path, repo: &Path, out: &mut Vec<String>) {
             if !SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()) {
                 walk(&path, repo, out);
             }
-        } else if kind.is_file() {
-            if let Ok(rel) = path.strip_prefix(repo) {
-                out.push(rel.to_string_lossy().into_owned());
-            }
+        } else if kind.is_file()
+            && let Ok(rel) = path.strip_prefix(repo)
+        {
+            out.push(rel.to_string_lossy().into_owned());
         }
     }
 }
 
 fn list_files(repo: &Path) -> Vec<String> {
     let git = Command::new("git").arg("-C").arg(repo).args(["ls-files", "-z"]).output();
-    if let Ok(out) = git {
-        if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout)
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect();
-        }
+    if let Ok(out) = git
+        && out.status.success()
+    {
+        return String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
     }
     let mut out = Vec::new();
     walk(repo, repo, &mut out);

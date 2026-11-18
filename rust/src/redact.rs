@@ -238,10 +238,10 @@ fn url_secrets(text: &str, spans: &mut Spans) {
         if let Some(q) = url.find('?') {
             let mut pos = start + q + 1;
             for pair in url[q + 1..].split('&') {
-                if let Some((k, _)) = pair.split_once('=') {
-                    if SENSITIVE_QUERY_PARAMS.contains(&k.to_ascii_lowercase().as_str()) {
-                        spans.push(pos + k.len() + 1..pos + pair.len());
-                    }
+                if let Some((k, _)) = pair.split_once('=')
+                    && SENSITIVE_QUERY_PARAMS.contains(&k.to_ascii_lowercase().as_str())
+                {
+                    spans.push(pos + k.len() + 1..pos + pair.len());
                 }
                 pos += pair.len() + 1;
             }
@@ -258,10 +258,10 @@ fn userinfo_secrets(text: &str, spans: &mut Spans) {
             continue;
         }
         let start = bytes[..at].iter().rposition(|b| is_url_end(*b) || matches!(b, b'/' | b'@')).map_or(0, |p| p + 1);
-        if let Some(colon) = text[start..at].find(':') {
-            if colon + 1 < at - start {
-                spans.push(start + colon + 1..at);
-            }
+        if let Some(colon) = text[start..at].find(':')
+            && colon + 1 < at - start
+        {
+            spans.push(start + colon + 1..at);
         }
     }
 }
@@ -557,20 +557,20 @@ fn literals_to_line_end(bytes: &[u8], from: usize, spans: &mut Spans) -> usize {
     let mut found = 0;
     while i < bytes.len() && bytes[i] != b'\n' {
         let raw = bytes[i] == b'r' && bytes.get(i + 1) == Some(&b'#');
-        if raw || matches!(bytes[i], b'"' | b'\'' | b'`') {
-            if let Some(mut r) = quoted_value(bytes, i) {
-                // Past the first literal, an unclosed quote is likely prose or a comment, so it
-                // must not swallow the lines below.
-                if found > 0 || i > from {
-                    r.end = r.end.min(line_end(bytes, i));
-                }
-                i = r.end.max(i + 1);
-                if r.len() > 2 {
-                    spans.push(r);
-                    found += 1;
-                }
-                continue;
+        if (raw || matches!(bytes[i], b'"' | b'\'' | b'`'))
+            && let Some(mut r) = quoted_value(bytes, i)
+        {
+            // Past the first literal, an unclosed quote is likely prose or a comment, so it
+            // must not swallow the lines below.
+            if found > 0 || i > from {
+                r.end = r.end.min(line_end(bytes, i));
             }
+            i = r.end.max(i + 1);
+            if r.len() > 2 {
+                spans.push(r);
+                found += 1;
+            }
+            continue;
         }
         i += 1;
     }
@@ -638,12 +638,12 @@ fn assignments(text: &str, spans: &mut Spans) {
             i += 1;
         }
         let name = &text[start..i];
-        if name.eq_ignore_ascii_case("bearer") || name.eq_ignore_ascii_case("basic") {
-            if let Some(value) = auth_scheme_value(bytes, i) {
-                i = value.end;
-                spans.push(value);
-                continue;
-            }
+        if (name.eq_ignore_ascii_case("bearer") || name.eq_ignore_ascii_case("basic"))
+            && let Some(value) = auth_scheme_value(bytes, i)
+        {
+            i = value.end;
+            spans.push(value);
+            continue;
         }
         if name == "-u" || name == "--user" {
             let v = skip_inline_space(bytes, i);

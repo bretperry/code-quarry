@@ -40,11 +40,11 @@ fn wants_help(args: &[String]) -> bool {
 fn dispatch(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let command = args.next();
     let rest: Vec<String> = args.collect();
-    if let Some(c) = command.as_deref().filter(|_| wants_help(&rest)) {
-        if let Some(text) = help::for_command(c) {
-            emit(text);
-            return Ok(());
-        }
+    if let Some(c) = command.as_deref().filter(|_| wants_help(&rest))
+        && let Some(text) = help::for_command(c)
+    {
+        emit(text);
+        return Ok(());
     }
     let mut args = rest.into_iter();
     match command.as_deref() {
