@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 type Spans = Vec<Range<usize>>;
 
@@ -644,7 +644,7 @@ fn literals_to_line_end(bytes: &[u8], from: usize, spans: &mut Spans) -> usize {
     while i < bytes.len() && bytes[i] != b'\n' {
         let raw = bytes[i] == b'r' && bytes.get(i + 1) == Some(&b'#');
         // `&'a str`, `<'a>`, `it's`: a lifetime or an apostrophe, not a literal.
-        let apostrophe = bytes[i] == b'\'' && i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'<' | b'&'));
+        let apostrophe = bytes[i] == b'\'' && is_apostrophe(bytes, 0, i);
         if (raw || matches!(bytes[i], b'"' | b'\'' | b'`')) && !apostrophe
             && let Some(mut r) = quoted_value(bytes, i)
         {
@@ -829,6 +829,24 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
     // Inside a string (`echo "db_password: x" >> f`, `-H "X-Api-Key: x"`), the value runs to the
     // string's closing quote. Without this, that quote reads as the start of a literal and the
     // value before it stays.
+    // A `key=value` pair inside a connection string: `"dbname=t user=u password=x"`,
+    // `"Server=db;Password=x;"`.
+    if let Some((q, _)) = open_quote(bytes, line_start, start)
+        && start > 0
+        && matches!(bytes[start - 1], b' ' | b';')
+        && bytes.get(name_end) == Some(&b'=')
+        && (names_a_secret(name) || name.eq_ignore_ascii_case("pwd"))
+    {
+        let v = name_end + 1;
+        let end = bytes[v..line_end(bytes, v)]
+            .iter()
+            .position(|b| *b == q || matches!(b, b' ' | b';' | b'\t'))
+            .map_or(line_end(bytes, v), |p| v + p);
+        if end > v && !text[v..].starts_with(MARK) {
+            spans.push(v..end);
+        }
+        return;
+    }
     // Only when the name opens the string: `"Invalid token: expected 3 parts"` is prose.
     if let Some((q, opened)) = open_quote(bytes, line_start, start)
         && text[opened + 1..start].trim().is_empty()
@@ -855,10 +873,11 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
                 if value.starts_with(MARK) || is_plain_word(value) || count {
                     return;
                 }
-                // `"Authorization: Bearer $TOKEN"` names a variable.
-                let variable = value.match_indices('$').any(|(i, _)| {
-                    value[i + 1..].starts_with(|c: char| c == '{' || c == '(' || c == '_' || c.is_ascii_alphabetic())
-                });
+                // `"Authorization: Bearer $TOKEN"` names a variable: the whole value (past a scheme
+                // word) is one `$VAR` or `${VAR}`. `"ab$cd"` is a value.
+                let last = value.rsplit(' ').next().unwrap_or(value);
+                let scheme_ok = value == last || value.split(' ').count() == 2;
+                let variable = scheme_ok && is_variable_reference(last);
                 if variable {
                     return;
                 }
@@ -1018,6 +1037,36 @@ fn trimmed_line_end(bytes: &[u8], from: usize) -> usize {
 }
 
 /// The quote still open at `at`, scanning from `line_start`, if `at` is inside a string.
+/// `$VAR`, `${VAR}` or `$(cmd)`: a reference, not a value.
+fn is_variable_reference(word: &str) -> bool {
+    let Some(rest) = word.strip_prefix('$') else { return false };
+    if let Some(inner) = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
+        return !inner.is_empty() && !inner.contains('}');
+    }
+    if rest.starts_with('(') && rest.ends_with(')') {
+        return true;
+    }
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// True when the `'` at `i` is an apostrophe or a Rust lifetime (`it's`, `<'a>`, `&'a str`), not a
+/// quote. A string prefix before it (`b'x'`, `rb'x'`, `f'x'`) still opens a literal.
+fn is_apostrophe(bytes: &[u8], line_start: usize, i: usize) -> bool {
+    if i <= line_start {
+        return false;
+    }
+    let prev = bytes[i - 1];
+    if matches!(prev, b'<' | b'&') {
+        return true;
+    }
+    if !prev.is_ascii_alphanumeric() {
+        return false;
+    }
+    let word_start = bytes[line_start..i].iter().rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_')).map_or(line_start, |p| line_start + p + 1);
+    let word = bytes[word_start..i].to_ascii_lowercase();
+    !matches!(word.as_slice(), b"b" | b"r" | b"u" | b"f" | b"rb" | b"br" | b"fr" | b"rf")
+}
+
 /// The quote still open at `at`, and where it opened, scanning from `line_start`. A `'` after a
 /// letter, `<` or `&` is an apostrophe or a Rust lifetime (`it's`, `<'a>`, `&'a str`), not a quote.
 fn open_quote(bytes: &[u8], line_start: usize, at: usize) -> Option<(u8, usize)> {
@@ -1026,7 +1075,7 @@ fn open_quote(bytes: &[u8], line_start: usize, at: usize) -> Option<(u8, usize)>
     while i < at {
         match (bytes[i], open) {
             (b'\\', Some(_)) => i += 1,
-            (b'\'', None) if i > line_start && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'<' | b'&')) => {}
+            (b'\'', None) if is_apostrophe(bytes, line_start, i) => {}
             (q @ (b'"' | b'\'' | b'`'), None) => open = Some((q, i)),
             (q, Some((o, _))) if q == o => open = None,
             _ => {}
@@ -1077,14 +1126,21 @@ fn xml_element_value(text: &str, start: usize, name_end: usize) -> Option<Range<
 /// across lines. An object's keys (`"a":`) stay.
 fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
     let mut depth = 0usize;
+    // Objects inside: an array of records (`"password": [{"href": ...}]`) holds fields, not secrets.
+    let own_objects = usize::from(bytes[open] == b'{');
+    let mut objects = 0usize;
     // The key before the next value: a schema key's value (`"type": "string"`) stays.
     let mut key: Option<Range<usize>> = None;
     let mut i = open;
     while i < bytes.len() {
         match bytes[i] {
-            b'[' | b'{' => depth += 1,
+            b'[' | b'{' => {
+                depth += 1;
+                objects += usize::from(bytes[i] == b'{');
+            }
             b']' | b'}' => {
                 depth -= 1;
+                objects -= usize::from(bytes[i] == b'}');
                 if depth == 0 {
                     return;
                 }
@@ -1106,6 +1162,7 @@ fn bracket_literals(bytes: &[u8], open: usize, spans: &mut Spans) {
                         key = Some(r.clone());
                     } else if r.len() > 2
                         && value_position
+                        && objects == own_objects
                         && !key.take().is_some_and(|k| is_schema_key(&String::from_utf8_lossy(&bytes[k])))
                     {
                         spans.push(r);
@@ -1172,12 +1229,12 @@ fn yaml_mapping_value(line: &str) -> Option<usize> {
 /// Keys whose values describe or configure a field rather than hold it: a schema's `type`, a
 /// chart's `enabled`, a compose file's `file`, a workflow's `runs-on`.
 const SCHEMA_KEYS: &[&str] = &[
-    "type", "description", "format", "$ref", "enabled", "required", "default", "region", "file", "runs-on", "uses",
+    "type", "description", "format", "$ref", "enabled", "required", "region", "file", "runs-on", "uses",
     "name", "kind", "title", "example", "examples", "pattern", "minlength", "maxlength", "enum", "nullable",
-    "readonly", "writeonly", "deprecated", "create", "mountpath", "path", "key", "optional", "items", "properties",
+    "readonly", "writeonly", "deprecated", "create", "mountpath", "path", "optional", "items", "properties",
     "additionalproperties", "minimum", "maximum", "label", "placeholder", "help", "hint", "algorithm", "encoding",
     "size", "rotationpolicy", "usages", "duration", "renewbefore", "apiversion", "metadata", "labels",
-    "annotations", "selector",
+    "annotations", "selector", "scheme", "timeout", "api_version",
 ];
 
 fn is_schema_key(key: &str) -> bool {
@@ -1195,6 +1252,14 @@ fn is_secret_candidate(value: &str, list_item: bool) -> bool {
     let file_name = bare.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty() && (2..=4).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_lowercase())
     });
+    // Base64 (`/` and `+` inside) and UUIDs are secret shapes, whatever else they look like.
+    let base64 = bare.len() >= 16
+        && bare.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        && bare.bytes().any(|b| b.is_ascii_uppercase())
+        && bare.bytes().any(|b| b.is_ascii_digit() || b == b'=');
+    if base64 || is_uuid(bare) {
+        return true;
+    }
     if file_name {
         return false;
     }
@@ -1246,7 +1311,7 @@ fn yaml_block(text: &str, mut at: usize, indent: usize, mode: Block, spans: &mut
         let content = line.trim();
         let pad = line.len() - line.trim_start().len();
         let next = stop + 1;
-        if content.is_empty() || (mode == Block::Children && content.starts_with('#')) {
+        if content.is_empty() || (mode != Block::Scalar && content.starts_with('#')) {
             at = next;
             continue;
         }
@@ -1270,17 +1335,22 @@ fn yaml_block(text: &str, mut at: usize, indent: usize, mode: Block, spans: &mut
             }
             continue;
         }
+        let item = if dash { skip_inline_space(bytes, body + 1).min(end) } else { body };
+        // Under a schema key's own children only: its siblings (`- name: x` then `value: y`) count.
+        let column = item - (stop - line.len());
         match schema_pad {
-            Some(p) if pad > p || (pad == p && dash) => continue,
+            Some(p) if column > p || (column == p && dash) => continue,
             _ => schema_pad = None,
         }
-        let item = if dash { skip_inline_space(bytes, body + 1).min(end) } else { body };
         let mapping = yaml_mapping_value(&text[item..end]);
         let value = match mapping {
             Some(offset) => {
                 let key = &text[item..item + offset].trim_end().trim_end_matches(':');
                 if is_schema_key(key) {
-                    schema_pad = Some(pad);
+                    // Only a schema key with children (`required:\n- key`) hides lines below it.
+                    if item + offset >= end {
+                        schema_pad = Some(column);
+                    }
                     continue;
                 }
                 skip_inline_space(bytes, item + offset)
@@ -1321,6 +1391,19 @@ fn names_a_secret_table(name: &str) -> bool {
 /// the more-indented lines below (when `whole`: the name is the secret, see `names_a_secret`). Code that looks the same (`token: string`, `password: String,`,
 /// `key: str = "x"`) is left to the other rules. True when it took the value.
 fn yaml_value(text: &str, line_start: usize, v: usize, name: &str, spans: &mut Spans) -> bool {
+    // A block scalar under a key that mentions a secret anywhere (`secret_value: |`,
+    // `credentials_json: |`) is a secret whole.
+    let bytes = text.as_bytes();
+    let line = &text[v..line_end(bytes, v)];
+    let block_head = line.split(" #").next().unwrap_or("").trim();
+    let mentions = name_words(name)
+        .iter()
+        .any(|w| ["secret", "secrets", "password", "passwords", "credential", "credentials", "token", "tokens"].contains(&w.as_str()));
+    if mentions && matches!(block_head, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        let indent = bytes[line_start..].iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+        yaml_block(text, (line_end(bytes, v) + 1).min(bytes.len()), indent, Block::Scalar, spans);
+        return true;
+    }
     // The key's last word decides: `db_password: x`, but not `password_reset: Reset your password`.
     if !names_a_secret(name) {
         return false;
@@ -1496,19 +1579,57 @@ fn toml_secret_tables(text: &str, spans: &mut Spans) {
             && let Some(eq) = pair
         {
             let v = skip_inline_space(bytes, at + eq + 1);
-            match bytes.get(v) {
-                Some(b'"' | b'\'') => spans.extend(quoted_value(bytes, v)),
-                Some(b'[' | b'{') => bracket_literals(bytes, v, spans),
+            // Where the value ends, so a multi-line array or string doesn't end the table.
+            let value_end = match bytes.get(v) {
+                Some(b'"' | b'\'') => {
+                    let r = quoted_value(bytes, v);
+                    let end = r.as_ref().map_or(stop, |r| r.end);
+                    spans.extend(r);
+                    end
+                }
+                Some(b'[' | b'{') => {
+                    bracket_literals(bytes, v, spans);
+                    bracket_end(bytes, v)
+                }
                 _ => {
                     let end = trimmed_line_end(bytes, v);
                     if end > v {
                         spans.push(v..end);
                     }
+                    stop
                 }
-            }
+            };
+            at = line_end(bytes, value_end.max(stop)) + 1;
+            continue;
         }
         at = stop + 1;
     }
+}
+
+/// The position past the bracket that closes the one at `open`, skipping quoted text.
+fn bracket_end(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            b'"' | b'\'' => {
+                if let Some(r) = quoted_value(bytes, i) {
+                    i = r.end.max(i + 1);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
 }
 
 /// A Kubernetes `kind: Secret`: every value under `data:` and `stringData:`, whatever its key.

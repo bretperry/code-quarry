@@ -563,3 +563,38 @@ fn secrets_inside_real_shapes_are_still_hidden() {
         assert_gone(input, secret);
     }
 }
+
+#[test]
+fn ssh_key_names_in_code_files_are_not_sensitive() {
+    for p in ["id_rsa.py", "src/my_id_rsa.rs", "id_rsa_parser.rs", "id_ed25519.go"] {
+        assert!(!is_sensitive_path(p), "{p}");
+    }
+    for p in ["id_rsa", "my_id_rsa", "deploy_id_ed25519", "id_rsa.bak"] {
+        assert!(is_sensitive_path(p), "{p}");
+    }
+}
+
+#[test]
+fn round_four_shapes() {
+    for (input, secret) in [
+        ("password = b'plainleak'\n", "plainleak"),
+        ("password = RB'plainleak'\n", "plainleak"),
+        ("conn = \"dbname=t user=u password=plainleak host=x\"\n", "plainleak"),
+        ("-H \"X-Api-Key: ab$plainleak\"\n", "plainleak"),
+        ("secrets:\n  - name: x\n    value: plainleak\n", "plainleak"),
+        ("secret_value: |\n  plainleak\n", "plainleak"),
+    ] {
+        assert_gone(input, secret);
+    }
+    // Lifetimes and English stay; a variable reference is not a value; k8s comments stay.
+    for input in [
+        "fn f<'a>(x: &'a str) -> &'a str { x }\n",
+        "// don't log it's token\n",
+        "-H \"Authorization: Bearer $TOKEN\"\n",
+        "kind: Secret\ndata:\n  # the database user\n",
+        "{\"password\": [\n  {\"href\": \"http://a\", \"comment\": \"x\"}\n]}\n",
+    ] {
+        assert_kept(input);
+    }
+    assert_eq!(clean("conn = \"dbname=t password=pw1 host=db\"\n").unwrap(), "conn = \"dbname=t password=[REDACTED] host=db\"\n");
+}
