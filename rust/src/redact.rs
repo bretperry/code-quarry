@@ -1658,7 +1658,8 @@ fn name_value_pairs(text: &str, spans: &mut Spans) {
     use std::sync::OnceLock;
     static YAML_NAME: OnceLock<regex::Regex> = OnceLock::new();
     static JSON_PAIR: OnceLock<regex::Regex> = OnceLock::new();
-    if !text.contains("name") {
+    // Cheap checks first: this runs on every file, and both shapes need both words.
+    if !text.contains("name") || !text.contains("value") {
         return;
     }
     let bytes = text.as_bytes();
@@ -1711,7 +1712,7 @@ fn terraform_secret_blocks(text: &str, spans: &mut Spans) {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<regex::Regex> = OnceLock::new();
     static FIELD: OnceLock<regex::Regex> = OnceLock::new();
-    if !text.contains('{') {
+    if !["variable", "output", "locals", "resource", "data"].iter().any(|k| text.contains(&format!("{k} \""))) {
         return;
     }
     let block = BLOCK.get_or_init(|| regex::Regex::new(r#"(?m)^[ \t]*(?:variable|output|locals|resource|data)\b[^{\n]*?"([^"\n]+)"[ \t]*\{"#).unwrap());
