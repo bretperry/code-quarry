@@ -547,6 +547,10 @@ fn real_config_and_code_shapes_are_not_redacted() {
         "token_endpoint_auth_methods: |\n  client_secret_basic\nsecret_key_name: |\n  my-key\n",
         "env:\n  - name: HOST\n    value: db\n  - name: API_KEY\n    valueFrom:\n      secretKeyRef:\n        name: x\n",
         "variable \"region\" {\n  default = \"us-east-1\"\n}\n",
+        // Round 6: interpolation in a format string, and a plain method call.
+        "let s = format!(\"pw={pw}\");\nlet t = format!(\"token={token} x\");\nlet n = objects.saturating_sub(n);\n",
+        // SQL and prose that mention a password without a literal.
+        "-- the password column is hashed\nSELECT password FROM users WHERE id = 1;\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];

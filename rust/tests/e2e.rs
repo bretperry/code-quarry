@@ -1067,6 +1067,13 @@ const KNOWN_LEAKS: &[(&str, &str, &str)] = &[
     ("v/v19.properties", "spring.datasource.password=LEAKV19\n", "LEAKV19"),
     ("v/v21.yml", "postgresql:\n  auth:\n    password: LEAKV21\n", "LEAKV21"),
     ("v/v22.yml", "credentials:\n  - LEAKV22\n", "LEAKV22"),
+    // Round 6.
+    ("r6/a.sql", "CREATE USER app WITH PASSWORD 'Sql-Pw-Tau-8899';\n", "Sql-Pw-Tau-8899"),
+    ("r6/b.sql", "ALTER USER x PASSWORD 'plainleak51';\n", "plainleak51"),
+    ("r6/c.sql", "CREATE USER 'u'@'%' IDENTIFIED BY 'plainleak52';\n", "plainleak52"),
+    ("r6/d.py", "cur.execute(\"ALTER ROLE app WITH PASSWORD 'plainleak53'\")\n", "plainleak53"),
+    ("r6/creds.txt", "machine api.x.com login bob password Ntrc-Pw-Zeta-7781\n", "Ntrc-Pw-Zeta-7781"),
+    ("r6/hosts.txt", "machine api.x.com\n  login bob\n  password plainleak54\n", "plainleak54"),
 ];
 
 #[test]

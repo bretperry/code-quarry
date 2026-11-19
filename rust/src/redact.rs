@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 type Spans = Vec<Range<usize>>;
 
@@ -241,6 +241,8 @@ fn find_all(text: &str) -> Spans {
     toml_secret_tables(text, &mut spans);
     k8s_secret_data(text, &mut spans);
     name_value_pairs(text, &mut spans);
+    sql_passwords(text, &mut spans);
+    netrc_passwords(text, &mut spans);
     terraform_secret_blocks(text, &mut spans);
     spans.retain(|s| !text[s.clone()].chars().all(|c| MARK.contains(c) || c.is_whitespace()));
     spans
@@ -864,7 +866,9 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
         match bytes.get(v) {
             // A nested literal, or a placeholder (`"token={token}"`, `"password=%s"`, `"key=$KEY"`):
             // the rules below decide.
-            Some(b'"' | b'\'' | b'`' | b'{' | b'$' | b'%' | b'\n') | None => {}
+            // An interpolation (`format!("pw={pw}")`, `"password=%s"`) is no value at all.
+            Some(b'{' | b'%') => return,
+            Some(b'"' | b'\'' | b'`' | b'$' | b'\n') | None => {}
             Some(_) => {
                 let end = closing_quote(bytes, v, q);
                 let end = v + text[v..end].trim_end().len();
@@ -892,6 +896,15 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
         }
     }
 
+    // Inside a string, `name={x}` or `name=%s` is an interpolation, not a value: `format!("pw={pw}")`.
+    // A quoted key on its own (`"secrets": {`) is JSON, not text in a string.
+    if let Some((q, _)) = open_quote(bytes, line_start, start)
+        && bytes.get(name_end) != Some(&q)
+        && let Some(after_op) = skip_operator(bytes, after_name)
+        && matches!(bytes.get(skip_inline_space(bytes, after_op)), Some(b'{' | b'%'))
+    {
+        return;
+    }
     // A quoted name marks the line: `option("--password", default="x")`, `json:"pw" default:"x"`.
     if name_was_quoted && literals_to_line_end(bytes, after_name, spans) > 0 {
         return;
@@ -1701,6 +1714,47 @@ fn name_value_pairs(text: &str, spans: &mut Spans) {
     for c in json_pair.captures_iter(text) {
         let (name, value) = (c.get(1).unwrap(), c.get(2).unwrap());
         if names_a_secret(name.as_str()) && value.len() > 2 {
+            spans.push(value.start()..value.end());
+        }
+    }
+}
+
+/// SQL: `CREATE USER app WITH PASSWORD 'x'`, `ALTER ROLE r PASSWORD 'x'`, `IDENTIFIED BY 'x'`, in
+/// .sql files and in SQL inside strings.
+fn sql_passwords(text: &str, spans: &mut Spans) {
+    use std::sync::OnceLock;
+    static SQL: OnceLock<regex::Regex> = OnceLock::new();
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("password '") && !lower.contains("identified by") && !lower.contains("password  '") {
+        return;
+    }
+    let sql = SQL.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(?:password|identified\s+by(?:\s+password)?)\s+('(?:[^'\\\n]|\\.|'')*')").unwrap()
+    });
+    for c in sql.captures_iter(text) {
+        let lit = c.get(1).unwrap();
+        if lit.len() > 2 {
+            spans.push(lit.start()..lit.end());
+        }
+    }
+}
+
+/// netrc-shaped lines: `machine api.x.com login bob password x`, or `password x` on its own line in
+/// a `machine` entry.
+fn netrc_passwords(text: &str, spans: &mut Spans) {
+    use std::sync::OnceLock;
+    static NETRC: OnceLock<regex::Regex> = OnceLock::new();
+    if !text.contains("machine ") && !text.contains("login ") {
+        return;
+    }
+    let netrc = NETRC.get_or_init(|| regex::Regex::new(r"(?m)^[ \t]*(?:(?:machine|login|default)\b[^\n]*?\s)?password[ \t]+(\S+)").unwrap());
+    let has_machine = text.contains("machine ");
+    for c in netrc.captures_iter(text) {
+        let (whole, value) = (c.get(0).unwrap(), c.get(1).unwrap());
+        let line = whole.as_str().trim_start();
+        // On its own line only inside a file with `machine` entries; prose stays.
+        let shaped = line.starts_with("machine") || line.starts_with("login") || line.starts_with("default") || has_machine;
+        if shaped && !value.as_str().starts_with(MARK) {
             spans.push(value.start()..value.end());
         }
     }
