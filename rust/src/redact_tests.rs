@@ -551,6 +551,10 @@ fn real_config_and_code_shapes_are_not_redacted() {
         "let s = format!(\"pw={pw}\");\nlet t = format!(\"token={token} x\");\nlet n = objects.saturating_sub(n);\n",
         // SQL and prose that mention a password without a literal.
         "-- the password column is hashed\nSELECT password FROM users WHERE id = 1;\n",
+        // Round 7: SQL columns (also in a file that mentions a machine), env lookups, comparisons.
+        "-- one row per machine\nCREATE TABLE users (\n  password text NOT NULL,\n  password VARCHAR(255),\n  password_hash bytea\n);\n",
+        "password := os.Getenv(\"PW\")\napi_key = os.environ.get('API_KEY')\nconst token = process.env[\"TOKEN\"]\nlet secret = env::var(\"SECRET\")?;\n",
+        "if user.password == hash:\n    pass\nif token != expected_token {\n}\n",
         // Restored: a section named auth.
         "auth:\n  user: bob\n  method: basic\n",
     ];

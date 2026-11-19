@@ -130,6 +130,7 @@ quarry protects what passes through quarry. An agent that skips quarry and opens
 - The Arabic letter mark (U+061C) in a file name is printed as is; other direction marks are escaped.
 - A key that names a Kubernetes Secret rather than holding one is never redacted: names starting with `existing` (`existingSecret`) or containing `pull` (`imagePullSecrets`).
 - Under a secret-named YAML key, `key:` with a value of only lowercase letters (`key: token`) reads as a field name in a Kubernetes Secret reference and is shown; one with a digit, capital or symbol is hidden.
+- A netrc line inside a shell string (`echo 'machine h login u password x' >> ~/.netrc`) shows its password; netrc lines are recognized only at the start of a line.
 - Ansible Vault ciphertext (`!vault |` followed by `$ANSIBLE_VAULT;...`) is shown; it is encrypted, not a plaintext secret.
 - A `|` block under a key that isn't on the secret-name list (`ssh_key: |`) is shown, while `api_key: |` is hidden whole. A private key inside either is still hidden by its `-----BEGIN ... PRIVATE KEY-----` shape.
 - A translated label without sentence punctuation under a key ending in `credential(s)` or `password` (`webauthn_credentials: Credenciales WebAuthn`) may be hidden.

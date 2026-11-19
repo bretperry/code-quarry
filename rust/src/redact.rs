@@ -12,7 +12,7 @@ pub const MARK: &str = "[REDACTED]";
 
 /// Bump when detection changes: `search` refuses an index built by an older redactor, because its
 /// vectors came from text this version would have cleaned differently.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 type Spans = Vec<Range<usize>>;
 
@@ -962,6 +962,23 @@ fn assigned_values(text: &str, start: usize, name_end: usize, spans: &mut Spans)
         bracket_literals(bytes, v, names_a_secret_table(name), spans);
         return;
     }
+    // An env lookup names where the value lives: `password := os.Getenv("PW")`. Only a default
+    // after the name (`os.getenv("PW", "x")`) can be a value.
+    if let Some(lookup_end) = env_lookup_name_end(text, v) {
+        if bytes.get(skip_inline_space(bytes, lookup_end)) == Some(&b',') {
+            literals_to_line_end(bytes, lookup_end, spans);
+        }
+        return;
+    }
+    // Compared with a name or attribute, not a literal: `if user.password == hash:`.
+    if matches!(&text[after_name..after_op], "==" | "!=" | "===" | "!==")
+        && !matches!(bytes.get(v), Some(b'"' | b'\'' | b'`'))
+    {
+        let word_end = v + bytes[v..].iter().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')).count();
+        if word_end > v && bytes[v].is_ascii_alphabetic() && !text[v..word_end].bytes().any(|b| b.is_ascii_digit()) {
+            return;
+        }
+    }
     // A quoted value may sit on the next line: `password =\n    "x"`.
     let next_token = after_op + bytes[after_op..].iter().take_while(|b| b.is_ascii_whitespace()).count();
     let at_quote = matches!(bytes.get(next_token), Some(b'"' | b'\'' | b'`' | b'b' | b'r' | b'f' | b'u'))
@@ -1719,17 +1736,36 @@ fn name_value_pairs(text: &str, spans: &mut Spans) {
     }
 }
 
+/// Where the variable-name literal of an env lookup at `v` ends (`os.Getenv("PW")`,
+/// `os.environ.get('PW', ...)`, `process.env["PW"]`, `env::var("PW")`, `System.getenv("PW")`,
+/// `ENV.fetch("PW")`), or None when `v` isn't one.
+fn env_lookup_name_end(text: &str, v: usize) -> Option<usize> {
+    use std::sync::OnceLock;
+    static LOOKUP: OnceLock<regex::Regex> = OnceLock::new();
+    let lookup = LOOKUP.get_or_init(|| {
+        regex::Regex::new(
+            r#"^(?:[A-Za-z_][\w:]*[.:]+)*(?:getenv|Getenv|getEnv|get_env|environ\.get|environ|env\.get|env|var|fetch|LookupEnv)\s*[(\[]\s*("[A-Za-z_][A-Za-z0-9_]*"|'[A-Za-z_][A-Za-z0-9_]*')"#,
+        )
+        .unwrap()
+    });
+    let line = &text[v..line_end(text.as_bytes(), v)];
+    lookup.captures(line).map(|c| v + c.get(1).unwrap().end())
+}
+
 /// SQL: `CREATE USER app WITH PASSWORD 'x'`, `ALTER ROLE r PASSWORD 'x'`, `IDENTIFIED BY 'x'`, in
 /// .sql files and in SQL inside strings.
 fn sql_passwords(text: &str, spans: &mut Spans) {
     use std::sync::OnceLock;
     static SQL: OnceLock<regex::Regex> = OnceLock::new();
     let lower = text.to_ascii_lowercase();
-    if !lower.contains("password '") && !lower.contains("identified by") && !lower.contains("password  '") {
+    if !lower.contains("password '") && !lower.contains("password \"") && !lower.contains("identified") {
         return;
     }
     let sql = SQL.get_or_init(|| {
-        regex::Regex::new(r"(?i)\b(?:password|identified\s+by(?:\s+password)?)\s+('(?:[^'\\\n]|\\.|'')*')").unwrap()
+        regex::Regex::new(
+            r#"(?i)\b(?:password|identified(?:\s+with\s+\w+)?\s+by(?:\s+password)?)\s+('(?:[^'\\\n]|\\.|'')*'|"(?:[^"\\\n]|\\.)*")"#,
+        )
+        .unwrap()
     });
     for c in sql.captures_iter(text) {
         let lit = c.get(1).unwrap();
@@ -1739,23 +1775,32 @@ fn sql_passwords(text: &str, spans: &mut Spans) {
     }
 }
 
-/// netrc-shaped lines: `machine api.x.com login bob password x`, or `password x` on its own line in
-/// a `machine` entry.
+/// netrc-shaped lines: `machine api.x.com login bob password x` on one line, or `password x`
+/// alone on its line in a file with `machine <host>` entries. A SQL column (`password text NOT
+/// NULL`) or prose is neither.
 fn netrc_passwords(text: &str, spans: &mut Spans) {
     use std::sync::OnceLock;
-    static NETRC: OnceLock<regex::Regex> = OnceLock::new();
+    static ONE_LINE: OnceLock<regex::Regex> = OnceLock::new();
+    static OWN_LINE: OnceLock<regex::Regex> = OnceLock::new();
+    static ENTRY: OnceLock<regex::Regex> = OnceLock::new();
     if !text.contains("machine ") && !text.contains("login ") {
         return;
     }
-    let netrc = NETRC.get_or_init(|| regex::Regex::new(r"(?m)^[ \t]*(?:(?:machine|login|default)\b[^\n]*?\s)?password[ \t]+(\S+)").unwrap());
-    let has_machine = text.contains("machine ");
-    for c in netrc.captures_iter(text) {
-        let (whole, value) = (c.get(0).unwrap(), c.get(1).unwrap());
-        let line = whole.as_str().trim_start();
-        // On its own line only inside a file with `machine` entries; prose stays.
-        let shaped = line.starts_with("machine") || line.starts_with("login") || line.starts_with("default") || has_machine;
-        if shaped && !value.as_str().starts_with(MARK) {
-            spans.push(value.start()..value.end());
+    let one_line = ONE_LINE
+        .get_or_init(|| regex::Regex::new(r"(?m)^[ \t]*(?:machine|login|default)\b[^\n]*?\spassword[ \t]+(\S+)").unwrap());
+    let own_line = OWN_LINE.get_or_init(|| regex::Regex::new(r"(?m)^[ \t]*password[ \t]+(\S+)[ \t]*$").unwrap());
+    let entry = ENTRY.get_or_init(|| regex::Regex::new(r"(?m)^[ \t]*machine[ \t]+\S+").unwrap());
+    let mut push = |m: regex::Match| {
+        if !m.as_str().starts_with(MARK) {
+            spans.push(m.start()..m.end());
+        }
+    };
+    for c in one_line.captures_iter(text) {
+        push(c.get(1).unwrap());
+    }
+    if entry.is_match(text) {
+        for c in own_line.captures_iter(text) {
+            push(c.get(1).unwrap());
         }
     }
 }

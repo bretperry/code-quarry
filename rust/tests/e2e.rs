@@ -1074,6 +1074,10 @@ const KNOWN_LEAKS: &[(&str, &str, &str)] = &[
     ("r6/d.py", "cur.execute(\"ALTER ROLE app WITH PASSWORD 'plainleak53'\")\n", "plainleak53"),
     ("r6/creds.txt", "machine api.x.com login bob password Ntrc-Pw-Zeta-7781\n", "Ntrc-Pw-Zeta-7781"),
     ("r6/hosts.txt", "machine api.x.com\n  login bob\n  password plainleak54\n", "plainleak54"),
+    // Round 7.
+    ("r7/a.sql", "CREATE USER u IDENTIFIED BY \"Xy9-pw\";\n", "Xy9-pw"),
+    ("r7/b.sql", "CREATE USER v IDENTIFIED WITH mysql_native_password BY 'plainleak55';\n", "plainleak55"),
+    ("r7/c.py", "password = os.getenv(\"PW\", \"plainleak56\")\n", "plainleak56"),
 ];
 
 #[test]
