@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 const RULE: &str = "## Code search
 
-To find where something lives in this repo, run `quarry search \"<plain-English question>\"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. It re-indexes by itself when files change.
+To find where something lives in this repo, run `quarry search \"<plain-English question>\"` before grepping or reading many files. It returns the top 5 functions with `path:lines` and their code, with detected secrets removed. It re-indexes by itself when files change. For exact text, run `quarry grep -n \"<text>\" [path]` instead of grep: it prints the same matching lines with secrets removed.
 ";
 
 /// Already present when a file mentions this.

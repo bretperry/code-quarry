@@ -303,3 +303,314 @@ fn sensitive_paths() {
         assert!(!is_sensitive_path(p), "{p}");
     }
 }
+
+#[test]
+fn yaml_values_under_a_secret_name_are_hidden_whole() {
+    for (input, want) in [
+        ("password: correct horse battery staple\n", "password: [REDACTED]\n"),
+        ("  - db_password:    two words here  # note\n", "  - db_password:    [REDACTED]  # note\n"),
+        ("\"api_key\": plain words\n", "\"api_key\": [REDACTED]\n"),
+        ("password: hunter\n", "password: [REDACTED]\n"),
+        ("private_key: |\n  line one\n\n  line two\nafter: ok\n", "private_key: |\n  [REDACTED]\n\n  [REDACTED]\nafter: ok\n"),
+        ("tokens:\n  - one\n  - two words\nname: x\n", "tokens:\n  - [REDACTED]\n  - [REDACTED]\nname: x\n"),
+        ("passwords:\n- one\nname: x\n", "passwords:\n- [REDACTED]\nname: x\n"),
+    ] {
+        assert_eq!(clean(input).unwrap(), want, "{input:?}");
+    }
+}
+
+#[test]
+fn code_that_looks_like_yaml_stays_readable() {
+    for input in [
+        "struct A {\n    password: String,\n}\n",
+        "class B:\n    password: str\n    api_key: SecretStr\n    token: Optional[str]\n",
+        "interface C {\n  token: string;\n}\n",
+        "auth:\n  user: bob\n  method: basic\n",
+        "const o = {\n  password: getPassword(),\n};\n",
+        "password: ${DB_PASSWORD}\n",
+    ] {
+        assert_eq!(clean(input).unwrap(), input);
+    }
+}
+
+#[test]
+fn an_escaped_space_does_not_end_a_value() {
+    assert_eq!(clean("PASSWORD=abc\\ def\\ LEAK\n").unwrap(), "PASSWORD=[REDACTED]\n");
+    // An unquoted .env value runs to the end of its line.
+    assert_eq!(clean("PASSWORD=abc\\ def more\n").unwrap(), "PASSWORD=[REDACTED]\n");
+}
+
+#[test]
+fn xml_elements_under_a_secret_name_are_hidden() {
+    assert_eq!(clean("<password>LEAK</password>\n").unwrap(), "<password>[REDACTED]</password>\n");
+    assert_eq!(clean("<apiKey id=\"1\">LEAK two</apiKey>\n").unwrap(), "<apiKey id=\"1\">[REDACTED]</apiKey>\n");
+    assert_eq!(clean("<password/>\n<name>x</name>\n").unwrap(), "<password/>\n<name>x</name>\n");
+}
+
+#[test]
+fn arrays_under_a_secret_name_hide_every_literal() {
+    assert_eq!(clean("secret = [\n \"LEAK\",\n]\nother = [\"fine\"]\n").unwrap(), "secret = [\n [REDACTED],\n]\nother = [\"fine\"]\n");
+    assert_eq!(
+        clean("{\"tokens\": [\n  \"A1\",\n  [\"B2\"]\n], \"x\": [\"ok\"]}\n").unwrap(),
+        "{\"tokens\": [\n  [REDACTED],\n  [[REDACTED]]\n], \"x\": [\"ok\"]}\n"
+    );
+    assert_eq!(clean("tokens = [t for t in words]\n").unwrap(), "tokens = [t for t in words]\n");
+}
+
+#[test]
+fn env_files_under_other_names_are_sensitive_and_templates_are_not() {
+    for p in ["app.env.txt", "prod.env.bak", "backup.env.txt", ".dev.vars", "x/.dev.vars.production", ".env", "a/prod.env"] {
+        assert!(is_sensitive_path(p), "{p}");
+    }
+    for p in [".env.example", ".env.local.sample", "app/.env.template", "environment.ts", "my.envelope.js"] {
+        assert!(!is_sensitive_path(p), "{p}");
+    }
+    // A template suffix exempts only the .env rule.
+    assert!(is_sensitive_path("secrets.json.example"));
+}
+
+// ---- QA round 2 ----
+
+#[test]
+fn generics_and_jsx_are_not_xml() {
+    for input in [
+        "fn peek() -> Option<Token> {\n    let a = 1;\n    let b = 2;\n}\n",
+        "let v: Vec<Token> = Vec::new();\nlet n = 3;\n",
+        "struct A { s: Arc<Secret> }\nfn f() {}\n",
+        "fn load() -> Result<Credentials, E> {\n    todo!()\n}\n",
+        "<PasswordInput onChange={(e) => set(e)} />\n<div>hello</div>\n",
+        "/// Parses an `<ident-token>`.\nfn parse() {}\n",
+        "<password>\n  multi\n</password>\n",
+    ] {
+        assert_kept(input);
+    }
+    assert_eq!(clean("<password>LEAK</password>\n").unwrap(), "<password>[REDACTED]</password>\n");
+    assert_eq!(clean("<Token>LEAK</Token> <b>x</b>\n").unwrap(), "<Token>[REDACTED]</Token> <b>x</b>\n");
+}
+
+#[test]
+fn a_value_inside_a_string_ends_at_the_closing_quote() {
+    for (input, secret) in [
+        ("echo \"db_password: LEAKV12\" >> f\n", "LEAKV12"),
+        ("curl -H \"X-Api-Key: LEAKV\" -H \"Accept: x\" url\n", "LEAKV"),
+        ("print(\"secret = LEAKV\", file=x)\n", "LEAKV"),
+        ("s = \"api_key: LEAKV\"; t = 1\n", "LEAKV"),
+        ("cmd('--password=LEAKV other')\n", "LEAKV"),
+    ] {
+        assert_gone(input, secret);
+    }
+    assert_eq!(clean("s = \"api_key: V1\"; t = 1\n").unwrap(), "s = \"api_key: [REDACTED]\"; t = 1\n");
+    assert_eq!(clean("c = \"Password=abc;User Id=bob\"\n").unwrap(), "c = \"Password=[REDACTED];User Id=bob\"\n");
+    assert_kept("log(\"token={token}\")\n");
+}
+
+#[test]
+fn more_yaml_shapes_under_secret_names() {
+    for (input, want) in [
+        ("password: &p LEAK\n", "password: &p [REDACTED]\n"),
+        ("password:\n  LEAK\nname: x\n", "password:\n  [REDACTED]\nname: x\n"),
+        ("passwords: [A1, B2]\n", "passwords: [[REDACTED]]\n"),
+        ("secrets:\n  a: LEAK1\n  b:\n    c: LEAK2\nname: x\n", "secrets:\n  a: [REDACTED]\n  b:\n    c: [REDACTED]\nname: x\n"),
+        ("tokens:\n  - one\n  # a note\n  - two\nname: x\n", "tokens:\n  - [REDACTED]\n  # a note\n  - [REDACTED]\nname: x\n"),
+        ("tokens:\n  - id: 1\n    value: LEAK\n", "tokens:\n  - id: 1\n    value: [REDACTED]\n"),
+    ] {
+        assert_eq!(clean(input).unwrap(), want, "{input:?}");
+    }
+}
+
+#[test]
+fn toml_tables_and_json_objects_under_secret_names() {
+    assert_eq!(
+        clean("[app]\nname = \"x\"\n[secrets]\ndb = \"LEAK1\"\nkey = LEAK2\n[other]\nport = 1\n").unwrap(),
+        "[app]\nname = \"x\"\n[secrets]\ndb = [REDACTED]\nkey = [REDACTED]\n[other]\nport = 1\n"
+    );
+    assert_eq!(clean("[database.credentials]\nvalue = LEAK\n").unwrap(), "[database.credentials]\nvalue = [REDACTED]\n");
+    // Other tables keep their values; only secret-named keys are hidden.
+    assert_eq!(
+        clean("[auth]\nenabled = true\nsite_url = \"http://localhost:3000\"\njwt_expiry = 3600\n").unwrap(),
+        "[auth]\nenabled = true\nsite_url = \"http://localhost:3000\"\njwt_expiry = 3600\n"
+    );
+    assert_eq!(
+        clean("{\n  \"secret\": {\n    \"a\": \"LEAK1\",\n    \"b\": [\"LEAK2\"]\n  },\n  \"name\": \"x\"\n}\n").unwrap(),
+        "{\n  \"secret\": {\n    \"a\": [REDACTED],\n    \"b\": [[REDACTED]]\n  },\n  \"name\": \"x\"\n}\n"
+    );
+}
+
+#[test]
+fn every_value_in_a_kubernetes_secret_is_hidden() {
+    let input = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\ndata:\n  user: YWRt\n  pw: c2Vj\nstringData:\n  url: plain\n---\nkind: ConfigMap\ndata:\n  mode: fast\n";
+    let want = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\ndata:\n  user: [REDACTED]\n  pw: [REDACTED]\nstringData:\n  url: [REDACTED]\n---\nkind: ConfigMap\ndata:\n  mode: fast\n";
+    assert_eq!(clean(input).unwrap(), want);
+}
+
+#[test]
+fn xml_name_and_value_pairs() {
+    for (input, want) in [
+        ("<property>\n  <name>db.password</name>\n  <value>LEAK</value>\n</property>\n", "<property>\n  <name>db.password</name>\n  <value>[REDACTED]</value>\n</property>\n"),
+        ("<name>fs.s3a.secret.key</name><value>LEAK</value>\n", "<name>fs.s3a.secret.key</name><value>[REDACTED]</value>\n"),
+        ("<entry key=\"password\">LEAK</entry>\n", "<entry key=\"password\">[REDACTED]</entry>\n"),
+        ("<setting name=\"ApiKey\" serializeAs=\"String\">\n  <value>LEAK</value>\n</setting>\n", "<setting name=\"ApiKey\" serializeAs=[REDACTED]>\n  <value>[REDACTED]</value>\n</setting>\n"),
+        ("<add key=\"ApiKey\" value=\"LEAK\" />\n", "<add key=\"ApiKey\" value=[REDACTED] />\n"),
+        ("<name>db.user</name><value>bob</value>\n", "<name>db.user</name><value>bob</value>\n"),
+    ] {
+        assert_eq!(clean(input).unwrap(), want, "{input:?}");
+    }
+}
+
+#[test]
+fn unquoted_values_with_spaces_run_to_the_end_of_the_line() {
+    for (input, want) in [
+        ("password = correct LEAK horse\n", "password = [REDACTED]\n"),
+        ("DB_PASSWORD=a LEAK b\n", "DB_PASSWORD=[REDACTED]\n"),
+        ("ENV DB_PASSWORD LEAK value\n", "ENV DB_PASSWORD [REDACTED]\n"),
+        ("ENV DB_PASSWORD=LEAK\n", "ENV DB_PASSWORD=[REDACTED]\n"),
+        ("Authorization: Digest username=LEAK\n", "Authorization: [REDACTED]\n"),
+        ("Authorization: Token LEAK\n", "Authorization: [REDACTED]\n"),
+    ] {
+        assert_eq!(clean(input).unwrap(), want, "{input:?}");
+    }
+    for input in ["token = token or default\n", "password = a if b else c\n", "password = get(x)\n"] {
+        assert_kept(input);
+    }
+}
+
+#[test]
+fn python_type_hints_are_types_not_values() {
+    for input in ["class S:\n    api_key: str | None\n", "class S:\n    secret: dict[str, Any]\n", "class S:\n    token: Optional[str]\n"] {
+        assert_kept(input);
+    }
+}
+
+#[test]
+fn more_sensitive_file_names() {
+    for p in [
+        "env", "env.local", "env.json", "config/prod-env", "dotenv", ".vault-token", "kubeconfig", ".my.cnf", ".s3cfg",
+        ".boto", "prod.tfvars.json", "id_rsa.bak", ".npmrc.bak", "cert.p12.bak", "wp-config.php.bak", ".env.swp",
+        ".id_rsa.swp", "config.env~", ".netrc.orig", "secrets.yml.old", "my_id_rsa", "deploy_id_ed25519",
+    ] {
+        assert!(is_sensitive_path(p), "{p}");
+    }
+    for p in ["env.ts", "src/env.rs", "env.d.ts", "env.example", "id_rsa.pub", ".env.example", "environment.js", "README.md.bak"] {
+        assert!(!is_sensitive_path(p), "{p}");
+    }
+}
+
+// ---- QA round 3: real shapes that must stay readable ----
+
+#[test]
+fn real_config_and_code_shapes_are_not_redacted() {
+    let fixtures = [
+        // argo-helm CRD schema under a secret-named property.
+        "auth:\n  properties:\n    passwordSecret:\n      description: PasswordSecret is the secret selector to the repository password\n      properties:\n        key:\n          description: The key of the secret to select from.\n          type: string\n        name:\n          description: Name of the referent.\n          type: string\n      required:\n      - key\n      type: object\n",
+        // Chart values.
+        "credentials:\n  enabled: true\n  region: us-east-1\nsecret:\n  enabled: false\n  create: true\n",
+        // Supabase config.toml.
+        "[auth]\nenabled = true\nsite_url = \"http://127.0.0.1:3000\"\njwt_expiry = 3600\nenable_signup = true\n",
+        // rubygems en.yml.
+        "en:\n  password_reset: Reset your password by clicking the link\n  credentials_required: Credentials required\n  token_expired: Your token has expired\n",
+        // Helm template under imagePullSecrets.
+        "spec:\n  imagePullSecrets:\n    {{- toYaml . | nindent 8 }}\n  password: {{ .Values.password | quote }}\n",
+        // Compose secrets.
+        "secrets:\n  db_password:\n    file: ./db_password.txt\n  api_key:\n    external: true\n",
+        // OpenAPI password field.
+        "components:\n  schemas:\n    Login:\n      properties:\n        password:\n          type: string\n          format: password\n          description: The user's password\n          minLength: 8\n",
+        // JSON Schema under a quoted password key.
+        "{\n  \"password\": {\n    \"type\": \"string\",\n    \"description\": \"The user's password\"\n  },\n  \"label\": \"x\"\n}\n",
+        // GitHub Actions job named bearer.
+        "jobs:\n  bearer:\n    runs-on: ubuntu-latest\n    needs: build\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n",
+        // Rust lifetimes.
+        "fn f<'a>(password: String, n: &'a str) -> &'a str {\n    n\n}\n",
+        // Prose inside a string.
+        "raise ValueError(\"Invalid token: expected 3 parts\")\n",
+        // Comment after a code value; a command after an env assignment.
+        "token = None  # set later\n",
+        // JSX form field with a secret-ish name.
+        "<FormField\n  control={form.control}\n  name=\"REFRESH_TOKEN_ROTATION_ENABLED\"\n  render={({ field }) => (\n    <FormItemLayout\n",
+        // A list of error codes under auth, and a zod chain.
+        "const C = {\n  auth: [\n    { code: 'session_not_found', description: 'User session not found' },\n  ],\n}\nconst schema = z.object({\n  password: z\n    .string()\n})\n",
+        // i18n labels under secret-named keys.
+        "en:\n  forgot_password: Forgot password?\n  new_api_key: New API key\n  count: \"%{count} tokens\"\n",
+        // Chart values naming Secrets and files, and a Secret's metadata.
+        "tlsSecret:\n  enabled: false\n  certItem: tls.crt\n  keyItem: tls.key\nglobal:\n  imagePullSecrets:\n  - pullSecret1\n",
+        "repo-credentials:\n  apiVersion: v1\n  metadata:\n    labels:\n      argocd.argoproj.io/secret-type: repository\n",
+        // TypeScript and JSX.
+        "token = captchaResponse?.response ?? null\n",
+        "<AuthContext.Provider value={value}>{children}</AuthContext.Provider>\n<Token>{t}</Token>\n",
+        "<TableHead key=\"access-key-id\">Access key ID</TableHead>\n",
+        "const keys: ApiKey[] = [\n  { name: 'publishable', type: 'publishable' },\n]\n",
+        "{\n  'v1-list-all-secrets': {\n    content: {\n      'application/json': components['schemas']['SecretResponse'][]\n    }\n  }\n}\n",
+        // SecretKeySelectors: `key` names a field of a Kubernetes Secret.
+        "authorization:\n  credentials:\n    name: my-token-secret\n    key: token\ns3:\n  accessKeySecret:\n    name: minio\n    key: accesskey\n",
+        // Round 5: byte literals, placeholders, block scalars that name a field, a plain env var.
+        "Token::U8(b'x'),\nlet buf = [b'\\0'; 32 * 1024]; // token\n",
+        "q = \"user=%s password=%s\"\nf\"host=x password={pw}\"\nc = \"Password={0};Server=x\"\nsql = \"WHERE password = ?\"\n",
+        "token_endpoint_auth_methods: |\n  client_secret_basic\nsecret_key_name: |\n  my-key\n",
+        "env:\n  - name: HOST\n    value: db\n  - name: API_KEY\n    valueFrom:\n      secretKeyRef:\n        name: x\n",
+        "variable \"region\" {\n  default = \"us-east-1\"\n}\n",
+        // Round 6: interpolation in a format string, and a plain method call.
+        "let s = format!(\"pw={pw}\");\nlet t = format!(\"token={token} x\");\nlet n = objects.saturating_sub(n);\n",
+        // SQL and prose that mention a password without a literal.
+        "-- the password column is hashed\nSELECT password FROM users WHERE id = 1;\n",
+        // Round 7: SQL columns (also in a file that mentions a machine), env lookups, comparisons.
+        "-- one row per machine\nCREATE TABLE users (\n  password text NOT NULL,\n  password VARCHAR(255),\n  password_hash bytea\n);\n",
+        "password := os.Getenv(\"PW\")\napi_key = os.environ.get('API_KEY')\nconst token = process.env[\"TOKEN\"]\nlet secret = env::var(\"SECRET\")?;\n",
+        "if user.password == hash:\n    pass\nif token != expected_token {\n}\n",
+        // Restored: a section named auth.
+        "auth:\n  user: bob\n  method: basic\n",
+    ];
+    for f in fixtures {
+        let out = clean(f).unwrap();
+        assert!(!out.contains(MARK), "over-redacted:\n{f}\n---\n{out}");
+    }
+    assert_eq!(clean("PASSWORD=hunter2x ./run.sh\n").unwrap(), "PASSWORD=[REDACTED] ./run.sh\n");
+}
+
+#[test]
+fn secrets_inside_real_shapes_are_still_hidden() {
+    for (input, secret) in [
+        ("secrets:\n  db_password:\n    value: LEAKA1\n", "LEAKA1"),
+        ("credentials:\n  enabled: true\n  access_key_id: LEAKA2\n", "LEAKA2"),
+        ("[auth]\nenabled = true\njwt_secret = \"LEAKA3\"\n", "LEAKA3"),
+        ("{\n  \"secrets\": {\n    \"type\": \"string\",\n    \"db\": \"LEAKA4\"\n  }\n}\n", "LEAKA4"),
+        ("en:\n  db_password: LEAKA5 words\n", "LEAKA5"),
+        ("echo \"db_password: LEAKA6\" >> f\n", "LEAKA6"),
+        ("class A {\n  authorization: string = hunterAB15\n}\n", "hunterAB15"),
+    ] {
+        assert_gone(input, secret);
+    }
+}
+
+#[test]
+fn ssh_key_names_in_code_files_are_not_sensitive() {
+    for p in ["id_rsa.py", "src/my_id_rsa.rs", "id_rsa_parser.rs", "id_ed25519.go"] {
+        assert!(!is_sensitive_path(p), "{p}");
+    }
+    for p in ["id_rsa", "my_id_rsa", "deploy_id_ed25519", "id_rsa.bak"] {
+        assert!(is_sensitive_path(p), "{p}");
+    }
+}
+
+#[test]
+fn round_four_shapes() {
+    for (input, secret) in [
+        ("password = b'plainleak'\n", "plainleak"),
+        ("password = RB'plainleak'\n", "plainleak"),
+        ("conn = \"dbname=t user=u password=plainleak host=x\"\n", "plainleak"),
+        ("-H \"X-Api-Key: ab$plainleak\"\n", "plainleak"),
+        ("secrets:\n  - name: x\n    value: plainleak\n", "plainleak"),
+        ("secret_value: |\n  plainleak\n", "plainleak"),
+    ] {
+        assert_gone(input, secret);
+    }
+    // Lifetimes and English stay; a variable reference is not a value; k8s comments stay.
+    for input in [
+        "fn f<'a>(x: &'a str) -> &'a str { x }\n",
+        "// don't log it's token\n",
+        "-H \"Authorization: Bearer $TOKEN\"\n",
+        "kind: Secret\ndata:\n  # the database user\n",
+        "{\"password\": [\n  {\"href\": \"http://a\", \"comment\": \"x\"}\n]}\n",
+    ] {
+        assert_kept(input);
+    }
+    assert_eq!(clean("conn = \"dbname=t password=pw1 host=db\"\n").unwrap(), "conn = \"dbname=t password=[REDACTED] host=db\"\n");
+}

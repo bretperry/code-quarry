@@ -131,7 +131,7 @@ fn print_hit(root: &Path, index: &Index, c: &ChunkEntry, score: f32, max_lines: 
         },
         Err(Refused::Sensitive) => crate::emit(&format!("{}\n[withheld: sensitive file]\n", header(""))),
         Err(Refused::Withheld) => crate::emit(&format!("{}\n[withheld: could not redact this file]\n", header(""))),
-        Err(Refused::Unreadable) => crate::emit(&format!("{}\n[file unreadable. Run: quarry index .]\n", header(""))),
+        Err(Refused::Unreadable | Refused::NotText) => crate::emit(&format!("{}\n[file unreadable. Run: quarry index .]\n", header(""))),
     }
 }
 

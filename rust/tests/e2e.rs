@@ -369,3 +369,733 @@ fn help_works_for_every_command_and_mistakes_point_to_it() {
     let version = String::from_utf8(repo.quarry(&["--version"]).stdout).unwrap();
     assert_eq!(version, format!("quarry {}\n", env!("CARGO_PKG_VERSION")));
 }
+
+// ---- quarry grep, sensitive-list, env-keys ----
+
+struct Run {
+    out: String,
+    err: String,
+    code: i32,
+}
+
+/// Runs the binary in `dir`, with HOME inside the repo so the user's own folders change nothing.
+fn run_in(dir: &Path, args: &[&str]) -> Run {
+    let out = Command::new(env!("CARGO_BIN_EXE_quarry")).args(args).current_dir(dir).env("HOME", dir).output().unwrap();
+    Run {
+        out: String::from_utf8(out.stdout).unwrap(),
+        err: String::from_utf8(out.stderr).unwrap(),
+        code: out.status.code().unwrap(),
+    }
+}
+
+impl Repo {
+    fn grep(&self, args: &[&str]) -> Run {
+        let mut all = vec!["grep"];
+        all.extend_from_slice(args);
+        run_in(&self.0, &all)
+    }
+
+    /// A git repo with a few files that all hold the word "needle".
+    fn needle_repo() -> Repo {
+        let repo = Repo::new();
+        repo.git_init();
+        repo.write("a.txt", "one\nTwo needle\nthree\nfour\nfive NEEDLE\nsix\n");
+        repo.write("src/b.ts", "needle in ts\n");
+        repo.write("src/c.test.ts", "needle in test\n");
+        repo.write("docs/d.md", "needle md\nneedles\n");
+        repo
+    }
+}
+
+#[test]
+fn grep_prints_what_the_mockup_shows() {
+    let repo = Repo::new();
+    repo.git_init();
+    let stripe = fakes()[2].0.clone();
+    let mut pay = vec!["import Stripe from \"stripe\";".to_string()];
+    pay.extend((2..=10).map(|_| String::new()));
+    pay.extend(["const client = new Stripe(".into(), format!("  process.env.STRIPE_KEY ?? \"{stripe}\","), ");".into()]);
+    repo.write("src/pay.ts", &(pay.join("\n") + "\n"));
+    repo.write("src/config.ts", &format!("export const gh = \"{}\";\n", fakes()[0].0));
+    repo.write(".env.local", &format!("STRIPE_KEY={stripe}\n"));
+    let r = repo.grep(&["-n", "STRIPE_KEY", "-C1"]);
+    assert_eq!(r.out, "src/pay.ts-11-const client = new Stripe(\nsrc/pay.ts:12:  process.env.STRIPE_KEY ?? \"[REDACTED]\",\nsrc/pay.ts-13-);\n");
+    assert_eq!(
+        r.err,
+        "quarry: withheld 1 file (sensitive: .env.local)\nquarry: 2 files had redactions; matches inside them can't show\n"
+    );
+    assert_eq!(r.code, 0);
+}
+
+#[test]
+fn grepping_a_secrets_value_finds_nothing_in_any_mode() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("app/settings.py", &python_with_fakes());
+    repo.write(".env", &fakes().iter().map(|(s, _)| format!("K{}={s}\n", s.len())).collect::<String>());
+    for (secret, _) in fakes() {
+        let upper = secret.to_uppercase();
+        let escaped = secret.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("\\{c}") }).collect::<String>();
+        let piece = secret.chars().take(12).collect::<String>();
+        for (flags, pattern) in [
+            (vec!["-F"], secret.as_str()),
+            (vec![], escaped.as_str()),
+            (vec!["-F", "-i"], upper.as_str()),
+            (vec!["-F", "-w"], secret.as_str()),
+            (vec!["-F"], piece.as_str()),
+        ] {
+            for mode in [&[][..], &["-l"], &["-c"], &["-C", "2"], &["-m", "1"]] {
+                let mut args = flags.clone();
+                args.extend_from_slice(mode);
+                args.extend(["--", pattern]);
+                let r = repo.grep(&args);
+                assert_eq!((r.code, r.out.as_str()), (1, ""), "{args:?}: {}", r.out);
+                assert!(!r.err.contains(&secret), "{args:?}: {}", r.err);
+            }
+        }
+    }
+    // The same files do match on their redacted text.
+    let r = repo.grep(&["-c", "-F", "[REDACTED]"]);
+    assert!(r.code == 0 && r.out.starts_with("app/settings.py:"), "{}", r.out);
+}
+
+#[test]
+fn what_the_notes_say_does_not_depend_on_the_pattern() {
+    let repo = Repo::needle_repo();
+    repo.write("src/key.ts", &format!("const k = \"{}\";\n", fakes()[0].0));
+    repo.write(".env", "A=1\n");
+    let hit = repo.grep(&["needle"]);
+    let miss = repo.grep(&[fakes()[0].0.as_str()]);
+    assert_eq!((hit.code, miss.code), (0, 1));
+    assert_eq!(hit.err, miss.err);
+    assert_eq!(hit.err, "quarry: withheld 1 file (sensitive: .env)\nquarry: 1 file had redactions; matches inside it can't show\n");
+}
+
+#[test]
+fn a_sensitive_file_is_withheld_by_name_and_never_read() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write(".env", "PLAIN_VALUE_XYZ=1\n");
+    repo.write("keys/a.py", "PLAIN_VALUE_XYZ = 1\n");
+    repo.write("deploy/server.pem", "PLAIN_VALUE_XYZ\n");
+    repo.write("src/ok.py", "x = 1\n");
+    for args in [&["PLAIN_VALUE_XYZ"][..], &["-l", "PLAIN_VALUE_XYZ"], &["-c", "PLAIN_VALUE_XYZ"]] {
+        let r = repo.grep(args);
+        assert_eq!((r.code, r.out.as_str()), (1, ""), "{args:?}");
+        assert_eq!(r.err, "quarry: withheld 3 files (sensitive: .env, deploy/server.pem, keys/a.py)\n");
+    }
+}
+
+#[test]
+fn flags_pick_lines_files_and_counts() {
+    let repo = Repo::needle_repo();
+    let all = "a.txt:2:Two needle\ndocs/d.md:1:needle md\ndocs/d.md:2:needles\nsrc/b.ts:1:needle in ts\nsrc/c.test.ts:1:needle in test\n";
+    assert_eq!(repo.grep(&["needle"]).out, all);
+    assert_eq!(repo.grep(&["-n", "needle"]).out, all);
+    assert_eq!(repo.grep(&["-i", "needle"]).out, all.replace("a.txt:2:Two needle\n", "a.txt:2:Two needle\na.txt:5:five NEEDLE\n"));
+    assert_eq!(repo.grep(&["-w", "needle"]).out, all.replace("docs/d.md:2:needles\n", ""));
+    assert_eq!(repo.grep(&["-l", "needle"]).out, "a.txt\ndocs/d.md\nsrc/b.ts\nsrc/c.test.ts\n");
+    assert_eq!(repo.grep(&["-c", "needle"]).out, "a.txt:1\ndocs/d.md:2\nsrc/b.ts:1\nsrc/c.test.ts:1\n");
+    assert_eq!(repo.grep(&["-c", "-m1", "needle"]).out, "a.txt:1\ndocs/d.md:1\nsrc/b.ts:1\nsrc/c.test.ts:1\n");
+    assert_eq!(repo.grep(&["-m1", "needle", "docs"]).out, "docs/d.md:1:needle md\n");
+    assert_eq!(repo.grep(&["-F", "-i", "NEEDLES"]).out, "docs/d.md:2:needles\n");
+    assert_eq!(repo.grep(&["-C1", "Two"]).out, "a.txt-1-one\na.txt:2:Two needle\na.txt-3-three\n");
+    assert_eq!(repo.grep(&["-A1", "Two|six"]).out, "a.txt:2:Two needle\na.txt-3-three\n--\na.txt:6:six\n");
+    assert_eq!(repo.grep(&["-B", "1", "five"]).out, "a.txt-4-four\na.txt:5:five NEEDLE\n");
+    assert_eq!(repo.grep(&["-A1", "needle md", "docs", "a.txt"]).out, "docs/d.md:1:needle md\ndocs/d.md-2-needles\n");
+}
+
+#[test]
+fn globs_paths_and_the_search_folder() {
+    let repo = Repo::needle_repo();
+    assert_eq!(repo.grep(&["-l", "needle", "-g", "*.ts"]).out, "src/b.ts\nsrc/c.test.ts\n");
+    assert_eq!(repo.grep(&["-l", "needle", "-g", "*.ts", "-g", "!*.test.ts"]).out, "src/b.ts\n");
+    assert_eq!(repo.grep(&["-l", "needle", "-g", "!src"]).out, "a.txt\ndocs/d.md\n");
+    assert_eq!(repo.grep(&["-l", "needle", "-g", "docs/**"]).out, "docs/d.md\n");
+    assert_eq!(repo.grep(&["-l", "needle", "src"]).out, "src/b.ts\nsrc/c.test.ts\n");
+    assert_eq!(repo.grep(&["-l", "needle", "src/b.ts", "docs/"]).out, "docs/d.md\nsrc/b.ts\n");
+    // From a subfolder it searches that folder, and paths read from there.
+    let sub = run_in(&repo.0.join("src"), &["grep", "-n", "needle"]);
+    assert_eq!(sub.out, "b.ts:1:needle in ts\nc.test.ts:1:needle in test\n");
+    // --repo names the folder from anywhere.
+    let far = run_in(&std::env::temp_dir(), &["grep", "-l", "needle", "src", "--repo", repo.0.to_str().unwrap()]);
+    assert_eq!((far.code, far.out.as_str()), (0, "src/b.ts\nsrc/c.test.ts\n"), "{}", far.err);
+}
+
+#[test]
+fn exit_codes_say_match_none_or_error() {
+    let repo = Repo::needle_repo();
+    assert_eq!(repo.grep(&["needle"]).code, 0);
+    let none = repo.grep(&["absent"]);
+    assert_eq!((none.code, none.out.as_str(), none.err.as_str()), (1, "", ""));
+    assert_eq!(repo.grep(&["-l", "absent"]).code, 1);
+    assert_eq!(repo.grep(&["-m0", "needle"]).code, 1);
+}
+
+#[test]
+fn bad_input_is_refused_with_exit_2_and_a_reason() {
+    let repo = Repo::needle_repo();
+    let table: &[(&[&str], &str)] = &[
+        (&["--wat", "x"], "unknown option --wat"),
+        (&["-z", "x"], "unknown option -z"),
+        (&[], "grep needs a pattern"),
+        (&["-i"], "grep needs a pattern"),
+        (&[""], "the pattern is empty"),
+        (&["(", "src"], "bad pattern"),
+        (&["(?<=x)y"], "bad pattern"),
+        (&["x", "nope"], "no such file or folder: nope"),
+        (&["x", ".."], "is outside"),
+        (&["-C", "x", "p"], "-C needs a number"),
+        (&["-m"], "-m needs a number"),
+        (&["-g"], "-g needs a glob"),
+        (&["x", "-g", "*.{ts"], "bad glob"),
+        (&["x", "--repo", "/no/such/folder"], "no such folder"),
+        (&["x", "--repo"], "--repo needs a folder"),
+    ];
+    for (args, why) in table {
+        let r = repo.grep(args);
+        assert_eq!(r.code, 2, "{args:?}: {}", r.err);
+        assert!(r.out.is_empty() && r.err.contains(why), "{args:?}: {}", r.err);
+    }
+    let r = repo.grep(&["-P", "x"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (2, "", "quarry: -P is not supported (Rust regex syntax only)\n"));
+    assert!(repo.grep(&["--bad-flag", "x"]).err.contains("Run `quarry help grep`"));
+}
+
+#[test]
+fn a_long_line_and_a_long_result_are_cut() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("long.txt", &format!("needle {}\n", "z".repeat(1000)));
+    let r = repo.grep(&["needle"]);
+    assert_eq!(r.out, format!("long.txt:1:needle {}... [cut]\n", "z".repeat(300 - "needle ".len())));
+
+    let lines: String = (1..=2000).map(|i| format!("needle number {i} {}\n", "y".repeat(80))).collect();
+    repo.write("many.txt", &lines);
+    let r = repo.grep(&["needle number", "many.txt"]);
+    assert_eq!(r.code, 0);
+    let (body, marker) = r.out.trim_end().rsplit_once('\n').unwrap();
+    assert!(body.chars().count() < 20_000, "{}", body.chars().count());
+    let shown = body.lines().count();
+    assert_eq!(marker, format!("... [cut: {} more matches. Narrow the pattern or add -g]", 2000 - shown));
+    // Counts and file lists are cut the same way.
+    for i in 0..400 {
+        repo.write(&format!("deep/{}/{i}.txt", "d".repeat(60)), "needle\n");
+    }
+    let r = repo.grep(&["-l", "needle", "deep"]);
+    assert!(r.out.chars().count() < 20_100 && r.out.ends_with(" more files. Narrow the pattern or add -g]\n"), "{}", &r.out[r.out.len().saturating_sub(100)..]);
+}
+
+#[test]
+fn ignored_files_need_no_ignore_and_git_internals_never_show() {
+    let repo = Repo::needle_repo();
+    repo.write(".gitignore", "dist/\n.env\n");
+    repo.write("dist/out.js", "needle built\n");
+    repo.write(".env", "needle=1\n");
+    let plain = repo.grep(&["-l", "needle"]);
+    assert_eq!((plain.out.as_str(), plain.err.as_str()), ("a.txt\ndocs/d.md\nsrc/b.ts\nsrc/c.test.ts\n", ""));
+    let all = repo.grep(&["-l", "needle", "--no-ignore"]);
+    assert_eq!(all.out, "a.txt\ndist/out.js\ndocs/d.md\nsrc/b.ts\nsrc/c.test.ts\n");
+    assert_eq!(all.err, "quarry: withheld 1 file (sensitive: .env)\n");
+    assert!(!all.out.contains(".git/"));
+    assert_eq!(repo.grep(&["-l", "needle", "--no-ignore", "dist"]).out, "dist/out.js\n");
+}
+
+#[test]
+fn outside_git_it_walks_the_folder_and_skips_dot_folders() {
+    let repo = Repo::new();
+    repo.write("visible/b.txt", "needle\n");
+    repo.write(".hidden/a.txt", "needle\n");
+    repo.write(".env", "needle\n");
+    assert_eq!(repo.grep(&["-l", "needle"]).out, "visible/b.txt\n");
+    assert_eq!(repo.grep(&["-l", "needle", ".hidden"]).out, ".hidden/a.txt\n");
+    assert_eq!(repo.grep(&["-l", "needle", "--no-ignore"]).out, ".hidden/a.txt\nvisible/b.txt\n");
+    assert!(repo.grep(&["needle"]).err.contains("withheld 1 file (sensitive: .env)"));
+}
+
+#[test]
+fn a_file_that_vanishes_or_is_binary_is_skipped_quietly_and_one_too_big_or_not_utf8_is_named() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("gone.txt", "needle\n");
+    repo.write("kept.txt", "needle\n");
+    repo.write("binary.bin", "needle\0\n");
+    repo.write("big.txt", &format!("needle\n{}", "x\n".repeat(300_000)));
+    repo.write("utf16.txt", "n\0e\0e\0d\0l\0e\0");
+    fs::write(repo.0.join("latin1.txt"), b"needle caf\xe9\n").unwrap();
+    assert!(Command::new("git").args(["add", "."]).current_dir(&repo.0).status().unwrap().success());
+    fs::remove_file(repo.0.join("gone.txt")).unwrap();
+    let outside = std::env::temp_dir().join(format!("quarry-outside-{}", std::process::id()));
+    fs::write(&outside, "needle\n").unwrap();
+    symlink(&outside, repo.0.join("link.txt")).unwrap();
+    let r = repo.grep(&["-l", "needle"]);
+    let _ = fs::remove_file(&outside);
+    let note = "quarry: skipped 3 files (over 500 KB or not UTF-8: big.txt, latin1.txt, utf16.txt)\n";
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (0, "kept.txt\n", note));
+    // The note does not depend on the pattern: a pattern found nowhere gets the same one.
+    let none = repo.grep(&["-l", "absent"]);
+    assert_eq!((none.code, none.out.as_str(), none.err.as_str()), (1, "", note));
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the redaction-failure hook exists only in debug builds")]
+fn a_file_that_fails_redaction_is_withheld_and_named() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("ok.txt", "needle\n");
+    repo.write("src/bad.txt", "needle BREAK_REDACTION_HERE\nonly_in_bad\n");
+    // Debug builds fail to clean any text holding the value of this variable.
+    let grep = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_quarry"))
+            .arg("grep")
+            .args(args)
+            .current_dir(&repo.0)
+            .env("QUARRY_TEST_FAIL_REDACTION", "BREAK_REDACTION_HERE")
+            .output()
+            .unwrap();
+        (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+    };
+    let note = "quarry: withheld 1 file (redaction failed: src/bad.txt)\n";
+    assert_eq!(grep(&["needle"]), (0, "ok.txt:1:needle\n".into(), note.into()));
+    assert_eq!(grep(&["-l", "needle"]), (0, "ok.txt\n".into(), note.into()));
+    assert_eq!(grep(&["-c", "needle"]), (0, "ok.txt:1\n".into(), note.into()));
+    // A match only in the withheld file is no match, and the note is the same.
+    assert_eq!(grep(&["only_in_bad"]), (1, String::new(), note.into()));
+    assert_eq!(grep(&["-c", "BREAK_REDACTION"]), (1, String::new(), note.into()));
+    // Without the hook the same file is searched, so the test above is about the hook.
+    let r = repo.grep(&["-l", "only_in_bad"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (0, "src/bad.txt\n", ""));
+}
+
+#[test]
+fn an_empty_repo_has_no_match_and_a_nested_repo_is_named_as_not_searched() {
+    let repo = Repo::new();
+    repo.git_init();
+    let r = repo.grep(&["x"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (1, "", ""));
+    repo.write("a.txt", "needle\n");
+    assert!(Command::new("git").args(["init", "-q", "libs/inner"]).current_dir(&repo.0).status().unwrap().success());
+    repo.write("libs/inner/x.txt", "needle\n");
+    let r = repo.grep(&["-l", "needle"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "a.txt\n"));
+    assert_eq!(r.err, "quarry: 1 submodule not searched (libs/inner)\n");
+}
+
+#[test]
+fn grep_needs_no_index_and_writes_nothing() {
+    let repo = Repo::needle_repo();
+    repo.grep(&["needle"]);
+    assert!(!repo.0.join(".quarry").exists());
+}
+
+#[test]
+fn sensitive_list_prints_the_narrow_list_as_json() {
+    let repo = Repo::new();
+    let r = run_in(&repo.0, &["sensitive-list", "--json"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(
+        r.out,
+        "{\"dirs\":[\".ssh\",\".aws\",\".gnupg\",\".kube\"],\
+\"names\":[\".env*\",\"id_rsa\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\".netrc\",\".npmrc\",\".pypirc\",\".pgpass\",\".git-credentials\"],\
+\"extensions\":[\"pem\",\"key\",\"p12\",\"pfx\",\"jks\",\"keystore\",\"ppk\",\"kdbx\",\"tfvars\",\"tfstate\"],\
+\"exempt_suffixes\":[\".example\",\".sample\",\".template\"]}\n"
+    );
+    for args in [&["sensitive-list"][..], &["sensitive-list", "--yaml"], &["sensitive-list", "--json", "x"]] {
+        let r = run_in(&repo.0, args);
+        assert!(r.code != 0 && r.out.is_empty() && r.err.contains("quarry help sensitive-list"), "{args:?}");
+    }
+}
+
+#[test]
+fn env_keys_prints_names_and_never_a_value() {
+    let repo = Repo::new();
+    let secrets: Vec<String> = fakes().into_iter().map(|(s, _)| s).collect();
+    let pem = format!("-----BEGIN {k}-----\n{}\n-----END {k}-----", secrets[5], k = ["PRIVATE", " KEY"].concat());
+    repo.write(
+        ".env",
+        &format!(
+            "# comment\nDATABASE_URL=postgres://admin:{}@db.example.com/app\nSTRIPE_KEY={}\nexport GH_TOKEN=\"{}\"\nPASSWORD={}\nPRIVATE_KEY=\"{}\"\nAFTER_KEY=1\nQUOTED='a=b'\n\nSTRIPE_KEY=again\n",
+            secrets[6], secrets[2], secrets[0], secrets[7], pem
+        ),
+    );
+    let r = run_in(&repo.0, &["env-keys", ".env"]);
+    assert_eq!((r.code, r.err.as_str()), (0, ""));
+    assert_eq!(r.out, "DATABASE_URL\nSTRIPE_KEY\nGH_TOKEN\nPASSWORD\nPRIVATE_KEY\nAFTER_KEY\nQUOTED\n");
+    assert!(!r.out.contains('='));
+    for s in &secrets {
+        assert!(!r.out.contains(s.as_str()) && !r.err.contains(s.as_str()));
+    }
+}
+
+#[test]
+fn env_keys_refuses_a_key_file_and_a_missing_file() {
+    let repo = Repo::new();
+    let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7ab==";
+    repo.write("server.pem", &format!("-----BEGIN {k}-----\n{body}\n-----END {k}-----\n", k = ["PRIVATE", " KEY"].concat()));
+    let r = run_in(&repo.0, &["env-keys", "server.pem"]);
+    assert!(r.code != 0 && r.out.is_empty() && r.err.contains("key file"), "{}", r.out);
+    assert!(!r.err.contains(body));
+    let r = run_in(&repo.0, &["env-keys", "nope"]);
+    assert!(r.code != 0 && r.out.is_empty() && r.err.contains("can't read nope"));
+    for args in [&["env-keys"][..], &["env-keys", "a", "b"], &["env-keys", "--json"]] {
+        let r = run_in(&repo.0, args);
+        assert!(r.code != 0 && r.err.contains("quarry help env-keys"), "{args:?}");
+    }
+    repo.write("empty.env", "");
+    let r = run_in(&repo.0, &["env-keys", "empty.env"]);
+    assert_eq!((r.code, r.out.as_str()), (0, ""));
+}
+
+#[test]
+fn help_covers_the_new_commands() {
+    let repo = Repo::new();
+    for args in [&["help", "grep"][..], &["grep", "--help"], &["help", "sensitive-list"], &["sensitive-list", "-h"], &["help", "env-keys"], &["env-keys", "--help"]] {
+        let r = run_in(&repo.0, args);
+        assert!(r.code == 0 && r.out.starts_with("quarry "), "{args:?}");
+    }
+    let main = run_in(&repo.0, &["help"]).out;
+    assert!(main.contains("quarry grep") || main.contains("grep <pattern>"));
+}
+
+#[test]
+fn setup_names_quarry_grep_in_the_rule() {
+    let repo = Repo::new();
+    repo.write("a.py", "def f():\n    return 1\n");
+    assert!(repo.quarry(&["setup", "--yes"]).status.success());
+    assert!(fs::read_to_string(repo.0.join("AGENTS.md")).unwrap().contains("quarry grep"));
+}
+
+#[test]
+fn secrets_never_reach_stderr_through_names_paths_or_errors() {
+    let repo = Repo::new();
+    repo.git_init();
+    let token = fakes()[0].0.clone();
+    repo.write(&format!("notes/{token}.txt"), "needle\n");
+    repo.write("ok.txt", "needle\n");
+    let r = repo.grep(&["needle"]);
+    assert_eq!(r.code, 0);
+    assert!(!r.err.contains(&token) && !r.out.contains(&token), "{}{}", r.out, r.err);
+    assert_eq!(r.err, "quarry: withheld 1 file (sensitive: [REDACTED].txt)\n");
+    // A secret-shaped path argument that does not exist.
+    let r = repo.grep(&["needle", &format!("{token}/x")]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("no such file or folder") && !r.err.contains(&token), "{}", r.err);
+    // A bad regex whose error quotes the pattern.
+    let r = repo.grep(&[&format!("({token}")]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("bad pattern") && !r.err.contains(&token), "{}", r.err);
+    // --repo naming a secret-shaped folder.
+    let r = repo.grep(&["x", "--repo", &format!("/nowhere/{token}")]);
+    assert_eq!(r.code, 2);
+    assert!(!r.err.contains(&token), "{}", r.err);
+}
+
+#[test]
+fn yaml_xml_escaped_and_array_values_do_not_show() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a.yml", "password: correct horse battery staple\nname: fine\n");
+    repo.write("b.sh", "PASSWORD=abc\\ def\\ LEAK1\n");
+    repo.write("c.xml", "<password>LEAK2</password>\n");
+    repo.write("d.toml", "secret = [\n \"LEAK3\",\n]\n");
+    let r = repo.grep(&["-n", "."]);
+    assert_eq!(r.code, 0);
+    for leak in ["battery", "LEAK1", "LEAK2", "LEAK3"] {
+        assert!(!r.out.contains(leak), "{leak}: {}", r.out);
+    }
+    assert!(r.out.contains("a.yml:2:name: fine\n"), "{}", r.out);
+}
+
+#[test]
+fn env_files_under_other_names_are_withheld_and_templates_are_searched() {
+    let repo = Repo::new();
+    repo.git_init();
+    for name in ["app.env.txt", "prod.env.bak", "backup.env.txt", ".dev.vars"] {
+        repo.write(name, "needle=1\n");
+    }
+    repo.write(".env.example", "needle=\n");
+    let r = repo.grep(&["-l", "needle"]);
+    assert_eq!((r.code, r.out.as_str()), (0, ".env.example\n"));
+    assert_eq!(r.err, "quarry: withheld 4 files (sensitive: .dev.vars, app.env.txt, backup.env.txt, prod.env.bak)\n");
+}
+
+#[test]
+fn a_search_folder_inside_a_secrets_folder_is_withheld() {
+    let repo = Repo::new();
+    repo.write(".kube/config", "needle: 1\n");
+    repo.write(".aws/credentials", "needle = 1\n");
+    let kube = run_in(&repo.0.join(".kube"), &["grep", "-n", ".", "config"]);
+    assert_eq!((kube.code, kube.out.as_str(), kube.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: config)\n"));
+    let aws = run_in(&std::env::temp_dir(), &["grep", "needle", "--repo", repo.0.join(".aws").to_str().unwrap(), "."]);
+    assert_eq!((aws.code, aws.out.as_str(), aws.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: credentials)\n"));
+}
+
+#[test]
+fn git_internals_are_never_searched_even_when_named() {
+    let repo = Repo::needle_repo();
+    assert!(Command::new("git").args(["add", "."]).current_dir(&repo.0).status().unwrap().success());
+    for args in [&["--no-ignore", "-l", ".", ".git"][..], &["-l", ".", ".git"], &["-l", ".", ".git/config"]] {
+        let r = repo.grep(args);
+        assert_eq!((r.code, r.out.as_str()), (1, ""), "{args:?}");
+    }
+}
+
+#[test]
+fn control_characters_in_a_file_name_are_escaped() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a\nforged.txt", "needle\n");
+    repo.write("tab\there.txt", "needle\n");
+    let r = repo.grep(&["-l", "needle"]);
+    assert_eq!(r.out, "a\\nforged.txt\ntab\\there.txt\n");
+    assert_eq!(repo.grep(&["needle"]).out, "a\\nforged.txt:1:needle\ntab\\there.txt:1:needle\n");
+    assert_eq!(repo.grep(&["-c", "needle"]).out, "a\\nforged.txt:1\ntab\\there.txt:1\n");
+}
+
+#[test]
+fn grep_flags_quarry_does_not_take_say_what_to_do() {
+    let repo = Repo::needle_repo();
+    for (flag, says) in [
+        ("-r", "quarry: -r is not needed (search is always recursive)"),
+        ("-R", "quarry: -R is not needed (search is always recursive)"),
+        ("-E", "quarry: -E is not needed (patterns are already extended regex)"),
+        ("-e", "quarry: -e is not supported; pass the pattern as the first argument"),
+        ("-o", "quarry: -o is not supported"),
+        ("-v", "quarry: -v is not supported"),
+        ("--recursive", "quarry: --recursive is not needed"),
+        ("-rn", "quarry: -r is not needed"),
+    ] {
+        let r = repo.grep(&[flag, "needle"]);
+        assert_eq!((r.code, r.out.as_str()), (2, ""), "{flag}");
+        assert!(r.err.starts_with(says), "{flag}: {}", r.err);
+    }
+}
+
+#[test]
+fn a_named_file_is_searched_even_when_git_ignores_it() {
+    let repo = Repo::needle_repo();
+    repo.write(".gitignore", "build/\n");
+    repo.write("build/out.log", "needle in log\n");
+    repo.write("build/.env", "needle=1\n");
+    assert_eq!(repo.grep(&["-l", "needle", "build"]).code, 1);
+    let r = repo.grep(&["needle", "build/out.log"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "build/out.log:1:needle in log\n"));
+    // Sensitive rules still apply to a named file.
+    let r = repo.grep(&["needle", "build/.env"]);
+    assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: build/.env)\n"));
+}
+
+#[test]
+fn a_cut_that_drops_only_context_still_says_so() {
+    let repo = Repo::new();
+    repo.git_init();
+    let mut lines = vec!["needle".to_string()];
+    lines.extend((0..400).map(|i| format!("context {i} {}", "c".repeat(80))));
+    repo.write("a.txt", &(lines.join("\n") + "\n"));
+    let r = repo.grep(&["-A", "400", "needle"]);
+    assert_eq!(r.code, 0);
+    assert!(r.out.starts_with("a.txt:1:needle\n"));
+    assert!(r.out.ends_with("... [cut: 0 more matches. Narrow the pattern or add -g]\n"), "{}", &r.out[r.out.len() - 120..]);
+}
+
+#[test]
+fn the_cap_is_one_budget_across_files_and_output_is_the_same_every_run() {
+    let repo = Repo::new();
+    repo.git_init();
+    for i in 0..300 {
+        let body: String = (0..20).map(|j| format!("needle {i} {j} {}\n", "n".repeat(60))).collect();
+        repo.write(&format!("f{i:03}.txt"), &body);
+    }
+    let first = repo.grep(&["needle"]);
+    assert_eq!(first.code, 0);
+    let (body, marker) = first.out.trim_end().rsplit_once('\n').unwrap();
+    assert!(body.chars().count() <= 20_000);
+    assert!(body.starts_with("f000.txt:1:needle 0 0 "));
+    // Lines come in file order with none skipped, so the shown part is a prefix of the whole.
+    let shown = body.lines().count();
+    let expected: Vec<String> = (0..300).flat_map(|i| (0..20).map(move |j| format!("f{i:03}.txt:{}:needle {i} {j} ", j + 1))).collect();
+    for (line, want) in body.lines().zip(&expected) {
+        assert!(line.starts_with(want.as_str()), "{line} vs {want}");
+    }
+    assert_eq!(marker, format!("... [cut: {} more matches. Narrow the pattern or add -g]", 6000 - shown));
+    for _ in 0..5 {
+        assert_eq!(repo.grep(&["needle"]).out, first.out);
+    }
+}
+
+#[test]
+fn help_flags_after_double_dash_are_patterns() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a.txt", "use -h for help\n");
+    let r = repo.grep(&["--", "-h"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "a.txt:1:use -h for help\n"));
+    assert_eq!(repo.grep(&["-F", "--", "--help"]).code, 1);
+    assert!(repo.grep(&["-h"]).out.contains("quarry grep"));
+}
+
+#[test]
+fn env_keys_skips_base64_continuations_and_reads_bom_and_crlf() {
+    let repo = Repo::new();
+    repo.write("x.env", "\u{feff}A=1\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC==\r\nc2VjcmV0cGFzc3dvcmQ=\r\nB=x \\\r\ncontinuedSECRETpart=more\r\nC=2\r\n");
+    let r = run_in(&repo.0, &["env-keys", "x.env"]);
+    assert_eq!((r.code, r.out.as_str()), (0, "A\nB\nC\n"));
+}
+
+/// Scale row: 10,000 files. Run with `cargo test --release -- --ignored at_scale`.
+#[test]
+#[ignore = "slow: writes 10,000 files"]
+fn grep_at_scale_10k_files() {
+    let repo = Repo::new();
+    repo.git_init();
+    for i in 0..10_000 {
+        let body: String = (0..30).map(|j| format!("fn f{j}() {{ let x = {j}; }} // line {j}\n")).collect();
+        let todo = if i % 100 == 0 { "// TODO: check\n" } else { "" };
+        repo.write(&format!("d{}/f{i}.rs", i / 500), &format!("{todo}{body}"));
+    }
+    let started = std::time::Instant::now();
+    let r = repo.grep(&["-c", "TODO"]);
+    let took = started.elapsed();
+    assert_eq!((r.code, r.out.lines().count()), (0, 100), "{}", r.err);
+    eprintln!("grep -c TODO over 10,000 files: {took:?}");
+}
+
+#[test]
+fn more_credential_folders_are_withheld_on_the_real_path() {
+    for dir in [".docker", ".azure", ".gcloud", ".secrets", ".config/gcloud"] {
+        let repo = Repo::new();
+        repo.write(&format!("{dir}/settings.json"), "needle\n");
+        let r = run_in(&std::env::temp_dir(), &["grep", "needle", "--repo", repo.0.join(dir).to_str().unwrap()]);
+        assert_eq!((r.code, r.out.as_str(), r.err.as_str()), (1, "", "quarry: withheld 1 file (sensitive: settings.json)\n"), "{dir}");
+    }
+    // A generic name is not checked on the real path: a project may live under `private/`.
+    let repo = Repo::new();
+    repo.write("private/proj/a.txt", "needle\n");
+    let r = run_in(&std::env::temp_dir(), &["grep", "-l", "needle", "--repo", repo.0.join("private/proj").to_str().unwrap()]);
+    assert_eq!((r.code, r.out.as_str()), (0, "a.txt\n"));
+}
+
+#[test]
+fn bidi_marks_in_a_file_name_are_escaped() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("a\u{202e}txt.exe", "needle\n");
+    repo.write("b\u{200f}.txt", "needle\n");
+    assert_eq!(repo.grep(&["-l", "needle"]).out, "a\\u{202e}txt.exe\nb\\u{200f}.txt\n");
+}
+
+#[test]
+fn a_secret_inside_a_quoted_command_does_not_show() {
+    let repo = Repo::new();
+    repo.git_init();
+    repo.write("setup.sh", "echo \"db_password: LEAKV12\" >> f\ncurl -H \"X-Api-Key: LEAKV13\" -H \"Accept: x\" url\n");
+    let r = repo.grep(&["-n", "."]);
+    assert_eq!(r.code, 0);
+    assert!(!r.out.contains("LEAKV12") && !r.out.contains("LEAKV13"), "{}", r.out);
+}
+
+/// Every leak reported in QA rounds 1 to 4, as (file, content, secret). Values are plain words,
+/// so the generic random-string detector can't be what hides them.
+const KNOWN_LEAKS: &[(&str, &str, &str)] = &[
+    // Round 1.
+    ("r1/a.yml", "password: correct horse plainleak01 staple\n", "plainleak01"),
+    ("r1/b.sh", "PASSWORD=abc\\ def\\ plainleak02\n", "plainleak02"),
+    ("r1/c.xml", "<password>plainleak03</password>\n", "plainleak03"),
+    ("r1/d.toml", "secret = [\n \"plainleak04\",\n]\n", "plainleak04"),
+    ("r1/e.json", "{\"tokens\": [\n  \"plainleak05\"\n]}\n", "plainleak05"),
+    ("r1/app.env.txt", "X=plainleak06\n", "plainleak06"),
+    ("r1/.dev.vars", "X=plainleak07\n", "plainleak07"),
+    // Round 2.
+    ("r2/f.sh", "echo \"db_password: plainleak08\" >> f\n", "plainleak08"),
+    ("r2/g.sh", "curl -H \"X-Api-Key: plainleak09\" -H \"Accept: x\" url\n", "plainleak09"),
+    ("r2/h.py", "print(\"secret = plainleak10\", file=x)\n", "plainleak10"),
+    ("r2/i.py", "s = \"api_key: plainleak11\"; t = 1\n", "plainleak11"),
+    ("r2/j.yml", "password: &p plainleak12\n", "plainleak12"),
+    ("r2/k.yml", "password:\n  plainleak13\nname: x\n", "plainleak13"),
+    ("r2/l.yml", "passwords: [plainleak14, other]\n", "plainleak14"),
+    ("r2/m.yml", "secrets:\n  a: plainleak15\n", "plainleak15"),
+    ("r2/n.toml", "[secrets]\ndb = \"plainleak16\"\n", "plainleak16"),
+    ("r2/o.json", "{\n  \"secret\": {\n    \"a\": \"plainleak17\"\n  }\n}\n", "plainleak17"),
+    ("r2/p.yml", "kind: Secret\ndata:\n  user: plainleak18\n", "plainleak18"),
+    ("r2/q.xml", "<property>\n  <name>db.password</name>\n  <value>plainleak19</value>\n</property>\n", "plainleak19"),
+    ("r2/r.xml", "<entry key=\"password\">plainleak20</entry>\n", "plainleak20"),
+    ("r2/s.xml", "<setting name=\"ApiKey\">\n  <value>plainleak21</value>\n</setting>\n", "plainleak21"),
+    ("r2/t.ini", "password = correct plainleak22 horse\n", "plainleak22"),
+    ("r2/u.sh", "DB_PASSWORD=a plainleak23 b\n", "plainleak23"),
+    ("r2/Dockerfile", "ENV DB_PASSWORD plainleak24\n", "plainleak24"),
+    ("r2/v.http", "Authorization: Token plainleak25\n", "plainleak25"),
+    // Round 3.
+    ("r3/w.ts", "class A {\n  authorization: string = plainleak26\n}\n", "plainleak26"),
+    ("r3/x.toml", "[auth]\nenabled = true\njwt_secret = \"plainleak27\"\n", "plainleak27"),
+    // Round 4.
+    ("r4/a.py", "password = b'plainleak28'\n", "plainleak28"),
+    ("r4/b.py", "password = rb'plainleak29'\ntoken = f'plainleak30'\n", "plainleak29"),
+    ("r4/b2.py", "token = f'plainleak30'\nsecret = u'plainleak31'\n", "plainleak30"),
+    ("r4/c.py", "psycopg2.connect(\"dbname=t user=u password=plainleak32\")\n", "plainleak32"),
+    ("r4/d.cs", "var c = \"Server=db;Password=plainleak33;User Id=bob\";\n", "plainleak33"),
+    ("r4/e.yml", "secrets:\n  - name: x\n    value: plainleak34\n", "plainleak34"),
+    ("r4/f.yml", "secrets:\n  key: plainleak35\n", "plainleak35"),
+    ("r4/g.yml", "credentials:\n  name: admin\n  key: plainleak36\n", "plainleak36"),
+    ("r4/h.yml", "secrets:\n  default: plainleak37\n", "plainleak37"),
+    ("r4/i.yml", "auth:\n  password:\n    key: plainleak38\n", "plainleak38"),
+    ("r4/j.yml", "secret_value: |\n  plainleak39\n", "plainleak39"),
+    ("r4/k.yml", "credentials_json: |\n  {\"k\": \"plainleak40\"}\n", "plainleak40"),
+    ("r4/l.sh", "curl -H \"X-Api-Key: ab$plainleak41\"\n", "plainleak41"),
+    ("r4/m.yml", "secrets:\n  db: Plainleak42/abcdEFGH1234+\n", "Plainleak42"),
+    ("r4/n.yml", "tokens:\n  - 550e8400-e29b-41d4-a716-446655440000\n", "550e8400-e29b-41d4-a716-446655440000"),
+    ("r4/o.toml", "[secrets]\nlist = [\n  \"a\",\n]\nlater = \"plainleak43\"\n", "plainleak43"),
+    // Round 5.
+    ("r5/a.json", "{\n  \"secrets\": {\n    \"prod\": {\n      \"a\": \"plainleak44\"\n    }\n  }\n}\n", "plainleak44"),
+    ("r5/b.json", "{\n  \"secrets\": [\n    {\"name\": \"DB\", \"value\": \"plainleak45\"}\n  ]\n}\n", "plainleak45"),
+    ("r5/c.json", "{\"secrets\": {\"prod\": {\"a\": \"plainleak46\"}}}\n", "plainleak46"),
+    ("r5/d.yml", "env:\n  - name: DB_PASSWORD\n    value: plainleak47\n", "plainleak47"),
+    ("r5/e.json", "[{\"name\": \"DB_PASSWORD\", \"value\": \"plainleak48\"}]\n", "plainleak48"),
+    ("r5/f.tf", "variable \"db_password\" {\n  type    = string\n  default = \"plainleak49\"\n}\n", "plainleak49"),
+    ("r5/g.yml", "password: !!str plainleak50\n", "plainleak50"),
+    // Round 5, the LEAKV inputs as sent.
+    ("v/v1.yml", "password: LEAKV1\n", "LEAKV1"),
+    ("v/v3.yml", "passwords: [LEAKV3, LEAKV4]\n", "LEAKV3"),
+    ("v/v4.yml", "passwords: [LEAKV3, LEAKV4]\n", "LEAKV4"),
+    ("v/v6.yml", "db_password: LEAKV6\n", "LEAKV6"),
+    ("v/v7.yml", "api_key: \"LEAKV7\"\n", "LEAKV7"),
+    ("v/v9.toml", "[secrets]\nkey = 'LEAKV9'\n", "LEAKV9"),
+    ("v/v10.json", "{\"secret\": \"LEAKV10\"}\n", "LEAKV10"),
+    ("v/v11.json", "{\"secrets\": {\"a\": \"LEAKV11\"}}\n", "LEAKV11"),
+    ("v/v16.http", "Authorization: token LEAKV16\n", "LEAKV16"),
+    ("v/v17.yml", "environment:\n  - JWT_SECRET=LEAKV17\n", "LEAKV17"),
+    ("v/v18.yml", "env:\n  API_TOKEN: LEAKV18\n", "LEAKV18"),
+    ("v/v19.properties", "spring.datasource.password=LEAKV19\n", "LEAKV19"),
+    ("v/v21.yml", "postgresql:\n  auth:\n    password: LEAKV21\n", "LEAKV21"),
+    ("v/v22.yml", "credentials:\n  - LEAKV22\n", "LEAKV22"),
+    // Round 6.
+    ("r6/a.sql", "CREATE USER app WITH PASSWORD 'Sql-Pw-Tau-8899';\n", "Sql-Pw-Tau-8899"),
+    ("r6/b.sql", "ALTER USER x PASSWORD 'plainleak51';\n", "plainleak51"),
+    ("r6/c.sql", "CREATE USER 'u'@'%' IDENTIFIED BY 'plainleak52';\n", "plainleak52"),
+    ("r6/d.py", "cur.execute(\"ALTER ROLE app WITH PASSWORD 'plainleak53'\")\n", "plainleak53"),
+    ("r6/creds.txt", "machine api.x.com login bob password Ntrc-Pw-Zeta-7781\n", "Ntrc-Pw-Zeta-7781"),
+    ("r6/hosts.txt", "machine api.x.com\n  login bob\n  password plainleak54\n", "plainleak54"),
+    // Round 7.
+    ("r7/a.sql", "CREATE USER u IDENTIFIED BY \"Xy9-pw\";\n", "Xy9-pw"),
+    ("r7/b.sql", "CREATE USER v IDENTIFIED WITH mysql_native_password BY 'plainleak55';\n", "plainleak55"),
+    ("r7/c.py", "password = os.getenv(\"PW\", \"plainleak56\")\n", "plainleak56"),
+];
+
+#[test]
+fn every_known_leak_stays_hidden() {
+    let repo = Repo::new();
+    repo.git_init();
+    for (path, text, _) in KNOWN_LEAKS {
+        repo.write(path, text);
+    }
+    let all = repo.grep(&["-n", "."]);
+    for (path, _, secret) in KNOWN_LEAKS {
+        assert!(!all.out.contains(secret) && !all.err.contains(secret), "{path}: {secret} shows in -n .");
+        for mode in [&["-F"][..], &["-l", "-F"], &["-c", "-F"], &["-i", "-F"]] {
+            let mut args = mode.to_vec();
+            args.extend(["--", secret]);
+            let r = repo.grep(&args);
+            assert_eq!((r.code, r.out.as_str()), (1, ""), "{path}: {args:?} found {secret}");
+            assert!(!r.err.contains(secret), "{path}: {secret} on stderr");
+        }
+    }
+}
