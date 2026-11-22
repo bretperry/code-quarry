@@ -156,8 +156,14 @@ fn fresh_index(start: &Path, refresh: bool) -> Result<(PathBuf, Index), String> 
     };
     let index = Index::load(&root)?;
     if refresh && index::is_stale(&root, &index) {
-        eprint!("quarry: files changed since indexing, re-indexing. {}", index::build(&root)?);
-        return Ok((root.clone(), Index::load(&root)?));
+        eprintln!("quarry: files changed since indexing, re-indexing.");
+        match index::build(&root).and_then(|note| Index::load(&root).map(|i| (note, i))) {
+            Ok((note, fresh)) => {
+                eprint!("{note}");
+                return Ok((root, fresh));
+            }
+            Err(e) => eprintln!("quarry: re-index failed ({e}). Searching the existing index, which may be stale."),
+        }
     }
     Ok((root, index))
 }

@@ -1,7 +1,4 @@
-.venv/
 .DS_Store
-code_scry.egg-info/
-__pycache__/
 target/
 .quarry/
 npm/dist/
